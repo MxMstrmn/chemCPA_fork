@@ -157,7 +157,7 @@ class CELoss(torch.nn.Module):
         @param preds: dimension [batch_size, total_num_perts]
         @param target: an array or list of tensors, each tensor is of dim [num_target_in_cell]
         """
-
+        
         softmax = torch.nn.Softmax(dim=1)
         preds = softmax(preds)
 
@@ -287,21 +287,21 @@ class ComPert(torch.nn.Module):
     num_knockouts: int # number of unqiue gene knockouts in the dataset, including control
 
     def __init__(
-            self,
-            num_genes: int,
-            num_drugs: int,
-            num_knockouts: int,
-            num_covariates: list,
-            device="cpu",
-            seed=0,
-            patience=5,
-            doser_type="logsigm",
-            knockout_effect_type="logsigm",
-            decoder_activation="linear",
-            hparams="",
-            drug_embedding_dimension=None,
-            knockout_embedding_dimension=None,
-            append_layer_width=None,
+        self,
+        num_genes: int,
+        num_drugs: int,
+        num_knockouts: int,
+        num_covariates: list,
+        device="cpu",
+        seed=0,
+        patience=5,
+        doser_type="logsigm",
+        knockout_effect_type="logsigm",
+        decoder_activation="linear",
+        hparams="",
+        drug_embedding_dimension=None,
+        knockout_embedding_dimension=None,
+        append_layer_width=None,
     ):
         super(ComPert, self).__init__()
         # set generic attributes
@@ -374,10 +374,10 @@ class ComPert(torch.nn.Module):
                 * self.hparams["embedding_encoder_depth"]
                 + [self.hparams["dim"]],
                 last_layer_act="linear",
-                )
+            )
 
             self.loss_adversary_drugs = CELoss()
-
+            
             # set dosers
             assert doser_type in ("mlp", "sigm", "logsigm", "amortized", None)
             if doser_type == "mlp":
@@ -419,10 +419,10 @@ class ComPert(torch.nn.Module):
                 * self.hparams["embedding_encoder_depth"]
                 + [self.hparams["dim"]],
                 last_layer_act="linear",
-                )
+            )
 
             self.loss_adversary_knockout = CELoss()
-
+            
             # set knockouts' effect
             assert knockout_effect_type in ("mlp", "sigm", "logsigm", "amortized", None)
             if knockout_effect_type == "mlp":
@@ -435,26 +435,26 @@ class ComPert(torch.nn.Module):
                             * self.hparams["knockout_effects_depth"]
                             + [1],
                             batch_norm=False,
-                            )
+                        )
                     )
             elif knockout_effect_type == "amortized":
                 # should this also have `batch_norm=False`?
                 self.knockout_effects = MLP(
                     [self.knockout_embedding_dimension + 1]
-                    + [self.hparams["knockout_effects_width"]]
+                    + [self.hparams["knockout_effects_width"]] 
                     * self.hparams["knockout_effects_depth"]
                     + [1],
-                    )
+                )
             else:
                 assert knockout_effect_type in ("sigm", "logsigm", None)
                 self.knockout_effects = GeneralizedSigmoid(
                     self.num_knockouts, self.device, nonlin=knockout_effect_type
                 )
             self.knockout_effect_type = knockout_effect_type
-
+        
 
         if self.num_covariates == [0]:
-            pass
+            pass    
         else:
             assert 0 not in self.num_covariates
             self.adversary_covariates = []
@@ -487,10 +487,10 @@ class ComPert(torch.nn.Module):
         has_knockouts = self.num_knockouts > 0
         has_covariates = self.num_covariates[0] > 0
 
-        get_params = lambda model: list(model.parameters())
+        get_params = lambda model: list(model.parameters()) 
         _parameters = (
-                get_params(self.encoder)
-                + get_params(self.decoder)
+            get_params(self.encoder)
+            + get_params(self.decoder)
         )
         if has_drugs:
             _parameters.extend(get_params(self.drug_embedding_encoder))
@@ -627,11 +627,11 @@ class ComPert(torch.nn.Module):
         Compute sum of drug embeddings, each of them multiplied by its
         dose-response curve.
 
-        @param drugs_idx: an array or list of tensor containing drug indices for each selected cell, and the indices of each cell is
+        @param drugs_idx: an array or list of tensor containing drug indices for each selected cell, and the indices of each cell is 
                         of dim [num_drugs_in_cell]
-        @param dosages: an array or list of tensor containing drug dosages for each selected cell, and the dosage of each cell is
+        @param dosages: an array or list of tensor containing drug dosages for each selected cell, and the dosage of each cell is 
                         of dim [num_drugs_in_cell]
-        @param drugs_embeddings: an array or list of tensor containing drug embeddings for each selected cell, and the drug embedding is
+        @param drugs_embeddings: an array or list of tensor containing drug embeddings for each selected cell, and the drug embedding is 
                                 of dim [num_drugs_in_cell, drug_embedding_dim]
         @return: a tensor of shape [batch_size, drug_embedding_dimension]
         """
@@ -640,7 +640,7 @@ class ComPert(torch.nn.Module):
         drugs_idx, dosages, drugs_embeddings = _move_inputs(
             drugs_idx, dosages, drugs_embeddings, device=self.device
         )
-
+    
         scaled_dosages = []
         if self.doser_type == "mlp":
             for idx, dosage in zip(drugs_idx, dosages):
@@ -654,7 +654,7 @@ class ComPert(torch.nn.Module):
 
 
         elif self.doser_type == "amortized":
-            total_stack = [torch.concat([embedding, dosage.view(-1, 1)], dim=1) for
+            total_stack = [torch.concat([embedding, dosage.view(-1, 1)], dim=1) for 
                            dosage, embedding in zip(dosages, drugs_embeddings)]
             total_stack = torch.cat(total_stack, dim=0)
             stacked_dosages = self.dosers(total_stack)
@@ -675,11 +675,11 @@ class ComPert(torch.nn.Module):
             for idx, dosage in zip(drugs_idx, dosages):
                 scaled_dosages.append(self.dosers(dosage, idx))
 
-
+        
         # Transform and adjust dimension to latent dims
         latent_drugs = [self.drug_embedding_encoder(i) for i in drugs_embeddings]
-
-        latent_drugs = [torch.einsum("b,bd->bd", [scaled_dosage, latent_drug]) for
+        
+        latent_drugs = [torch.einsum("b,bd->bd", [scaled_dosage, latent_drug]) for 
                         scaled_dosage, latent_drug in zip(scaled_dosages, latent_drugs)]
         return torch.stack([latent_drug.sum(dim=0) for latent_drug in latent_drugs])
 
@@ -687,14 +687,14 @@ class ComPert(torch.nn.Module):
         """
         Compute sum of knockout embeddingss, each of them multiplied by its effects curve.
 
-        @param knockouts_idx: an array or list of tensor containing knockout indices for each selected cell, and the indices of each cell is
+        @param knockouts_idx: an array or list of tensor containing knockout indices for each selected cell, and the indices of each cell is 
                         of dim [num_knockouts_in_cell]
-
-        @param knockouts_embeddings: an arraay or list of tensor containing knockout embeddings for each selected cell, and the knockout embedding is
+    
+        @param knockouts_embeddings: an arraay or list of tensor containing knockout embeddings for each selected cell, and the knockout embedding is 
                                 of dim [num_knockouts_in_cell, knockout_embedding_dim]
         @return: a tensor of shape [batch_size, knockout_embedding_dimension]
         """
-
+        
         knockouts_idx, knockouts_embeddings = _move_inputs(
             knockouts_idx, knockouts_embeddings, device=self.device
         )
@@ -705,14 +705,14 @@ class ComPert(torch.nn.Module):
                 scaled_effect = []
                 for i in range(effect.shape[0]):
                     scaled_effect.append(
-                        self.knockout_effects[idx[i]](effect[i].unsqueeze(0)).sigmoid()
+                        self.knockout_effects[idx[i]](effect[i].unsqueeze(0)).sigmoid() 
                     )
                 scaled_effect = torch.stack(scaled_effect, dim=1)
                 scaled_effects.append(scaled_effect.squeeze(0))
         elif self.knockout_effect_type == "amortized":
-            total_stack = [torch.concat([embedding, effect.view(-1, 1)], dim=1) for
+            total_stack = [torch.concat([embedding, effect.view(-1, 1)], dim=1) for 
                            effect, embedding in zip(effects, knockouts_embeddings)]
-
+            
             total_stack = torch.cat(total_stack, dim=0)
             stacked_effects = self.knockout_effects(total_stack)
             stacked_idx = []
@@ -733,29 +733,29 @@ class ComPert(torch.nn.Module):
             for idx, effect in zip(knockouts_idx, effects):
                 scaled_effects.append(self.knockout_effects(effect, idx))
 
-
+        
         # Transform and adjust dimension to latent dims
         latent_knockouts = [self.knockout_embedding_encoder(i) for i in knockouts_embeddings]
-        latent_knockouts = [torch.einsum("b,bd->bd", [scaled_effect, latent_knockout]) for
+        latent_knockouts = [torch.einsum("b,bd->bd", [scaled_effect, latent_knockout]) for 
                             scaled_effect, latent_knockout in zip(scaled_effects, latent_knockouts)]
         return torch.stack([latent_knockout.sum(dim=0) for latent_knockout in latent_knockouts])
 
     def predict(
-            self,
-            genes,
-            drugs_idx=None,
-            dosages=None,
-            drugs_embeddings=None,
-            knockouts_idx=None,
-            knockouts_embeddings=None,
-            covariates_idx=None,
-            return_latent_basal=False,
+        self,
+        genes,
+        drugs_idx=None,
+        dosages=None,
+        drugs_embeddings=None,
+        knockouts_idx=None,
+        knockouts_embeddings=None,
+        covariates_idx=None,
+        return_latent_basal=False,
     ):
         """
         Predict "what would have the gene expression `genes` been, had the
         cells in `genes` with covariates been treated with perturbations
         """
-
+        
         genes, drugs_idx, dosages, drugs_embeddings, knockouts_idx, knockouts_embeddings, covariates_idx = _move_inputs(
             genes, drugs_idx, dosages, drugs_embeddings, knockouts_idx, knockouts_embeddings, covariates_idx, device=self.device
         )
@@ -810,15 +810,15 @@ class ComPert(torch.nn.Module):
         return self.patience_trials > self.patience
 
     def update(
-            self,
-            genes,
-            drugs_idx=None,
-            dosages=None,
-            drugs_embeddings=None,
-            knockouts_idx=None,
-            knockouts_embeddings=None,
-            covariates_idx=None,
-    ):
+        self,
+        genes,
+        drugs_idx=None,
+        dosages=None,
+        drugs_embeddings=None,
+        knockouts_idx=None,
+        knockouts_embeddings=None,
+        covariates_idx=None,
+        ):
         """
         Update model's parameters given a minibatch of genes, drugs, knockouts and
         covariates.
@@ -879,7 +879,7 @@ class ComPert(torch.nn.Module):
                 return grads
 
             if self.num_drugs > 0:
-
+                
                 adv_drugs_grad_penalty = compute_gradient_penalty(
                     adversary_drugs_predictions.sum(), latent_basal
                 )
@@ -896,12 +896,12 @@ class ComPert(torch.nn.Module):
 
             self.optimizer_adversaries.zero_grad()
             (
-                    adversary_drugs_loss
-                    + self.hparams["penalty_adversary"] * adv_drugs_grad_penalty
-                    + adversary_knockouts_loss
-                    + self.hparams["penalty_adversary"] * adv_knockouts_grad_penalty
-                    + adversary_covariates_loss
-                    + self.hparams["penalty_adversary"] * adv_covs_grad_penalty
+                adversary_drugs_loss
+                + self.hparams["penalty_adversary"] * adv_drugs_grad_penalty
+                + adversary_knockouts_loss
+                + self.hparams["penalty_adversary"] * adv_knockouts_grad_penalty
+                + adversary_covariates_loss
+                + self.hparams["penalty_adversary"] * adv_covs_grad_penalty
             ).backward()
             self.optimizer_adversaries.step()
         else:
@@ -911,10 +911,10 @@ class ComPert(torch.nn.Module):
             if self.num_knockouts > 0:
                 self.optimizer_knockout_effects.zero_grad()
             (
-                    reconstruction_loss
-                    - self.hparams["reg_adversary_drug"] * adversary_drugs_loss
-                    - self.hparams["reg_adversary_knockout"] * adversary_knockouts_loss
-                    - self.hparams["reg_adversary_cov"] * adversary_covariates_loss
+                reconstruction_loss
+                - self.hparams["reg_adversary_drug"] * adversary_drugs_loss
+                - self.hparams["reg_adversary_knockout"] * adversary_knockouts_loss
+                - self.hparams["reg_adversary_cov"] * adversary_covariates_loss
             ).backward()
             self.optimizer_autoencoder.step()
             if self.num_drugs > 0:
@@ -931,7 +931,7 @@ class ComPert(torch.nn.Module):
             "penalty_adv_drugs": adv_drugs_grad_penalty.item(),
             "penalty_adv_knockouts": adv_knockouts_grad_penalty.item(),
             "penalty_adv_covariates": adv_covs_grad_penalty.item(),
-
+            
         }
 
     @classmethod

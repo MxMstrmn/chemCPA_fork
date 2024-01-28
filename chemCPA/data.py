@@ -16,7 +16,7 @@ def canonicalize_smiles(smiles: Optional[str]):
         return Chem.CanonSmiles(smiles)
     else:
         return None
-
+    
 def drug_names_to_once_canon_smiles(
         drug_names: List[str], dataset: sc.AnnData, perturbation_key: str, smiles_key: str
 ):
@@ -53,19 +53,19 @@ class Dataset:
     knockouts_names_unique_sorted: np.ndarray #sorted list of all gene knockout names in the dataset
 
     def __init__(
-            self,
-            data: str,
-            drug_key=None,
-            dose_key=None,
-            drugs_embeddings=None,
-            knockout_key=None,
-            knockouts_embeddings=None,
-            covariate_keys=None,
-            smiles_key=None,
-            pert_category="cov_geneid",
-            split_key="split",
-            degs_key = 'rank_genes_groups_cov'
-
+        self,
+        data: str,
+        drug_key=None,
+        dose_key=None,
+        drugs_embeddings=None,
+        knockout_key=None,
+        knockouts_embeddings=None,
+        covariate_keys=None,
+        smiles_key=None,
+        pert_category="cov_geneid",
+        split_key="split",
+        degs_key = None
+        
     ):
         """
         :param covariate_keys: Names of obs columns which stores covariate names (eg cell type).
@@ -103,7 +103,7 @@ class Dataset:
                 raise ValueError(
                     f"A 'dose_key' is required when provided a 'drug_key'({drug_key})."
                 )
-
+            
             self.drugs_names = np.array(data.obs[drug_key].values)
             self.dose_names = np.array(data.obs[dose_key].values)
 
@@ -114,7 +114,7 @@ class Dataset:
 
             self.drugs_names_unique_sorted = list(sorted(drugs_names_unique))
             self.num_drugs = len(self.drugs_names_unique_sorted)
-
+            
             #only allow for one unqiue name for control
             self.drug_ctrl_name = np.unique(data[data.obs["control"] == 1].obs[self.drug_key])[0]
 
@@ -125,7 +125,7 @@ class Dataset:
             self.canon_smiles_unique_sorted = drug_names_to_once_canon_smiles(
                 list(self.drugs_names_unique_sorted), data, drug_key, smiles_key
             )
-
+    
 
             drugs_idx = []
             for comb in self.drugs_names:
@@ -138,17 +138,17 @@ class Dataset:
             dosages = []
             for comb in self.dose_names:
                 dosages_combos = comb.split("+")
-                dosages_combos = [float(i) for i in dosages_combos]
+                dosages_combos = [float(i) for i in dosages_combos] 
                 dosages_combos = torch.tensor(dosages_combos, dtype=torch.float32)
                 dosages.append(dosages_combos)
             self.dosages = np.array(dosages, dtype=object)
-
+            
             if isinstance(drugs_embeddings, torch.nn.Embedding):
                 self.drugs_embeddings = drugs_embeddings
             elif isinstance(drugs_embeddings, str):
                 drugs_embeddings_df = pd.read_parquet(drugs_embeddings)
-                drugs_embeddings = torch.tensor(drugs_embeddings_df.loc[self.canon_smiles_unique_sorted].values,
-                                                dtype=torch.float32, device=self.device)
+                drugs_embeddings = torch.tensor(drugs_embeddings_df.loc[self.canon_smiles_unique_sorted].values, 
+                             dtype=torch.float32, device=self.device)
                 self.drugs_embeddings = torch.nn.Embedding.from_pretrained(drugs_embeddings, freeze=True)
             else:
                 # maybe provided with None, create random embeddings
@@ -166,14 +166,14 @@ class Dataset:
 
         if knockout_key is not None:
             self.knockouts_names = np.array(data.obs[knockout_key].values)
-
+        
             # get unique gene knockouts
             knockouts_names_unique = set()
             for d in self.knockouts_names:
                 [knockouts_names_unique.add(i) for i in d.split("+")]
             self.knockouts_names_unique_sorted = list(sorted(knockouts_names_unique))
             self.num_knockouts = len(self.knockouts_names_unique_sorted)
-
+    
             #only allow for one unqiue name for control
             self.knockout_ctrl_name = np.unique(data[data.obs["control"] == 1].obs[self.knockout_key])[0]
 
@@ -194,8 +194,8 @@ class Dataset:
                 self.knockouts_embeddings = knockouts_embeddings
             elif isinstance(knockouts_embeddings, str):
                 knockouts_embeddings_df = pd.read_parquet(knockouts_embeddings)
-                knockouts_embeddings = torch.tensor(knockouts_embeddings_df.loc[self.knockouts_names_unique_sorted].values,
-                                                    dtype=torch.float32, device=self.device)
+                knockouts_embeddings = torch.tensor(knockouts_embeddings_df.loc[self.knockouts_names_unique_sorted].values, 
+                             dtype=torch.float32, device=self.device)
                 self.knockouts_embeddings = torch.nn.Embedding.from_pretrained(knockouts_embeddings, freeze=True)
             else:
                 # maybe provided with None, create random embeddings
@@ -260,6 +260,13 @@ class Dataset:
         Raises ValueError if the drug doesn't exist in the dataset.
         """
         return self._drugs_name_to_idx[drug_name]
+    
+    def knockout_name_to_idx(self, knockout_name: str):
+        """
+        For the given gene knockout, return it's index. The index will be persistent for each dataset (since the list is sorted).
+        Raises ValueError if the drug doesn't exist in the dataset.
+        """
+        return self._knockouts_name_to_idx[knockout_name]
 
     def knockout_name_to_idx(self, knockout_name: str):
         """
@@ -278,7 +285,7 @@ class Dataset:
             indx(self.knockouts_embeddings, indx(self.knockouts_idx, i)),
             *[indx(cov, i) for cov in self.covariates_idx],
         )
-
+        
 
     def __len__(self):
         return len(self.genes)
@@ -309,6 +316,9 @@ class SubDataset:
         self.knockouts_names = indx(dataset.knockouts_names, indices)
         self.pert_categories = indx(dataset.pert_categories, indices)
         self.covariate_names = {}
+        assert (
+            "cell_type" in self.covariate_keys
+        ), "`cell_type` must be provided as a covariate"
         for cov in self.covariate_keys:
             self.covariate_names[cov] = indx(dataset.covariate_names[cov], indices)
 
@@ -339,18 +349,18 @@ class SubDataset:
 
 
 def load_dataset_splits(
-        dataset_path: str,
-        drug_key: Union[str, None],
-        dose_key: Union[str, None],
-        knockout_key: Union[str, None],
-        covariate_keys: Union[list, str, None],
-        smiles_key: Union[str, None],
-        pert_category: str = "cov_geneid",
-        split_key: str = "split",
-        degs_key='rank_genes_groups_cov',
-        return_dataset: bool = False,
-        drugs_embeddings = None,
-        knockouts_embeddings = None
+    dataset_path: str,
+    drug_key: Union[str, None],
+    dose_key: Union[str, None],
+    knockout_key: Union[str, None],
+    covariate_keys: Union[list, str, None],
+    smiles_key: Union[str, None],
+    pert_category: str = "cov_geneid",
+    split_key: str = "split",
+    degs_key=None,
+    return_dataset: bool = False,
+    drugs_embeddings = None,
+    knockouts_embeddings = None
 ):
     dataset = Dataset(
         dataset_path,
