@@ -64,7 +64,7 @@ class Dataset:
         smiles_key=None,
         pert_category="cov_geneid",
         split_key="split",
-        degs_key = None
+        degs_key = 'rank_genes_groups_cov'
         
     ):
         """
@@ -309,9 +309,6 @@ class SubDataset:
         self.knockouts_names = indx(dataset.knockouts_names, indices)
         self.pert_categories = indx(dataset.pert_categories, indices)
         self.covariate_names = {}
-        assert (
-            "cell_type" in self.covariate_keys
-        ), "`cell_type` must be provided as a covariate"
         for cov in self.covariate_keys:
             self.covariate_names[cov] = indx(dataset.covariate_names[cov], indices)
 
@@ -350,7 +347,7 @@ def load_dataset_splits(
     smiles_key: Union[str, None],
     pert_category: str = "cov_geneid",
     split_key: str = "split",
-    degs_key=None,
+    degs_key='rank_genes_groups_cov',
     return_dataset: bool = False,
     drugs_embeddings = None,
     knockouts_embeddings = None
