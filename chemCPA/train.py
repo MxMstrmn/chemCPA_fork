@@ -47,7 +47,7 @@ def compute_prediction(autoencoder: ComPert, genes, drugs=None, knockouts=None, 
     Computes the prediction of a ComPert `autoencoder` and
     directly splits into `mean` and `variance` predictions
     """
-
+    
     genes_pred = autoencoder.predict(
         genes=genes,
         drugs_idx=drugs[0] if (drugs is not None) else None,
@@ -59,7 +59,7 @@ def compute_prediction(autoencoder: ComPert, genes, drugs=None, knockouts=None, 
         return_latent_basal=False
     ).detach()
     #delete [0], don't know why it is here
-
+    
     dim = genes.size(1)
     mean = genes_pred[:, :dim]
     var = genes_pred[:, dim:]
@@ -125,7 +125,7 @@ def evaluate_logfold_r2(
                 f"For covariate {covariate} we have only one control in current set of observations. Skipping {cell_pert_comb}."
             )
             continue
-
+        
         if ds_treated.covariates_idx is not None:
             covs = [cov_idx[idx_treated].repeat(n_idx_ctrl) for cov_idx in ds_treated.covariates_idx]
         else: covs = None
@@ -142,7 +142,7 @@ def evaluate_logfold_r2(
                 [ds_treated.knockouts_embeddings(ds_treated.knockouts_idx[idx_treated])] * n_idx_ctrl
             )
         else: knockouts = None
-
+        
         # Could try moving the whole genes tensor to GPU once for further speedups (but more memory problems)
         genes_ctrl = ds_ctrl.genes[idx_ctrl_all].to(device=_device)
         genes_pred, _ = compute_prediction(
@@ -199,6 +199,7 @@ def evaluate_disentanglement(autoencoder, data: chemCPA.data.Dataset):
                 covariates_idx=data.covariates_idx,
                 return_latent_basal=True,
             )
+        
 
 
     mean = latent_basal.mean(dim=0, keepdim=True)
@@ -247,7 +248,7 @@ def evaluate_disentanglement(autoencoder, data: chemCPA.data.Dataset):
         knockout_score = compute_score(data.knockouts_names)
         total_scores.append(knockout_score)
     else: total_scores.append(None)
-    if data.covariate_keys is not None:
+    if data.covariate_keys is not None: 
         covariate_score = []
         for cov in data.covariate_names.keys():
             if len(np.unique(data.covariate_names[cov])) == 0:
@@ -256,7 +257,7 @@ def evaluate_disentanglement(autoencoder, data: chemCPA.data.Dataset):
                 covariate_score.append(compute_score(data.covariate_names[cov]))
         total_scores.append(covariate_score)
     else: total_scores.append(None)
-
+    
     return total_scores
 
 
@@ -310,7 +311,7 @@ def evaluate_r2(autoencoder: ComPert, dataset: SubDataset, genes_control: torch.
         idx_all = bool2idx(bool_category)
         idx = idx_all[0]
 
-        if dataset.covariates_idx is not None:
+        if dataset.covariates_idx is not None: 
             covs = [cov_idx[idx].repeat(n_rows) for cov_idx in dataset.covariates_idx]
         else: covs = None
         if dataset.drugs_idx is not None:
@@ -523,7 +524,7 @@ def evaluate(
             stats_disent_knockout = disent_scores[1]
             # optimal score == always predicting the most common drug
             optimal_disent_score_knockout = max(knockouts_counts) / len(datasets["test"])
-        else:
+        else: 
             stats_disent_knockout = None
             optimal_disent_score_knockout = None
         if datasets['test'].num_covariates[0] > 0:
@@ -533,7 +534,7 @@ def evaluate(
                 most_common_element = torch.mode(cov)[0]
                 count_most_common = torch.sum(cov == most_common_element).item()
                 optimal_disent_cov.append(count_most_common / cov.size(0))
-        else:
+        else: 
             stats_disent_cov = None
             optimal_disent_cov = None
     else:
