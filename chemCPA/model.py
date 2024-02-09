@@ -1,26 +1,23 @@
 import json
 import logging
 from collections import OrderedDict
-from typing import Union
+from typing import Any, Union
+from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRScheduler
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+import lightning as L
+
+from chemCPA.train import evaluate_r2, evaluate_r2_sc, evaluate_logfold_r2, evaluate
 
 
-def _move_inputs(*inputs, device="cuda"):
-    def mv_input(x):
-        if x is None:
-            return None
-        elif isinstance(x, torch.Tensor):
-            return x.to(device)
-        elif isinstance(x, list):
-            return [mv_input(y) for y in x]
-        elif isinstance(x, np.ndarray):
-            return [mv_input(y) for y in x]
-
-    return [mv_input(x) for x in inputs]
-
+if torch.cuda.is_available():
+    _device = "cuda"
+elif torch.backends.mps.is_available():
+    _device = "mps"
+else:
+    _device = "cpu"
 
 class NBLoss(torch.nn.Module):
     def __init__(self):
@@ -167,7 +164,7 @@ class CELoss(torch.nn.Module):
         return (loss.sum() / batch_size)
 
 
-class MLP(torch.nn.Module):
+class MLP(L.LightningModule):
     """
     A multilayer perceptron with ReLU activations and optional BatchNorm.
 
@@ -240,28 +237,29 @@ class MLP(torch.nn.Module):
         return self.network(x)
 
 
-class GeneralizedSigmoid(torch.nn.Module):
+class GeneralizedSigmoid(L.LightningModule):
     """
     Sigmoid, log-sigmoid or linear functions for encoding dose-response for
     drug perurbations.
     """
 
-    def __init__(self, dim, device, nonlin="sigm"):
+    def __init__(self, dim, nonlin="sigm"):
         """Sigmoid modeling of continuous variable.
         Params
         ------
         nonlin : str (default: logsigm)
-            One of logsigm, sigm or None. If None, then the doser is disabled and just returns the dosage unchanged.
+            One of logsigm, sigm or None. If None, just returns the input unchanged.
         """
         super(GeneralizedSigmoid, self).__init__()
-        assert nonlin in ("sigm", "logsigm", None)
+        assert nonlin in ("sigm", "logsigm", "original")
         self.nonlin = nonlin
-        self.beta = torch.nn.Parameter(
-            torch.ones(1, dim, device=device), requires_grad=True
-        )
-        self.bias = torch.nn.Parameter(
-            torch.zeros(1, dim, device=device), requires_grad=True
-        )
+        if self.nonlin in ["sigm", "logsigm"]:
+            self.beta = torch.nn.Parameter(
+                torch.ones(1, dim), requires_grad=True
+            )
+            self.bias = torch.nn.Parameter(
+                torch.zeros(1, dim), requires_grad=True
+            )
 
     def forward(self, x, idx: list):
         if self.nonlin == "logsigm":
@@ -278,7 +276,7 @@ class GeneralizedSigmoid(torch.nn.Module):
             return x
 
 
-class ComPert(torch.nn.Module):
+class ComPert(L.LightningModule):
     """
     Our main module, the ComPert autoencoder
     """
@@ -292,13 +290,13 @@ class ComPert(torch.nn.Module):
         num_drugs: int,
         num_knockouts: int,
         num_covariates: list,
-        device="cpu",
+        hparams,
+        training_hparams,
+        test_hparams,
         seed=0,
-        patience=5,
         doser_type="logsigm",
-        knockout_effect_type="logsigm",
+        knockout_effect_type="original",
         decoder_activation="linear",
-        hparams="",
         drug_embedding_dimension=None,
         knockout_embedding_dimension=None,
         append_layer_width=None,
@@ -309,48 +307,30 @@ class ComPert(torch.nn.Module):
         self.num_drugs = num_drugs
         self.num_knockouts = num_knockouts
         self.num_covariates = num_covariates
-        self.device = device
         self.seed = seed
         self.drug_embedding_dimension = drug_embedding_dimension
         self.knockout_embedding_dimension = knockout_embedding_dimension
 
-        # early-stopping
-        self.patience = patience
-        self.best_score = -1e3
-        self.patience_trials = 0
 
+        #manual optimization
+        self.automatic_optimization = False
 
-        # set hyperparameters
-        if isinstance(hparams, dict):
-            self.hparams = hparams
-        else:
-            self.set_hparams_(seed, hparams)
-
-        # store the variables used for initialization (allows restoring model later).
-        self.init_args = {
-            "num_genes": num_genes,
-            "num_drugs": num_drugs,
-            "num_knockouts": num_knockouts,
-            "num_covariates": num_covariates,
-            "seed": seed,
-            "patience": patience,
-            "doser_type": doser_type,
-            "knockout_effect_type": knockout_effect_type,
-            "decoder_activation": decoder_activation,
-            "hparams": hparams,
-        }
-
+        if not isinstance(hparams, dict):
+            hparams = self.set_hparams_(seed, hparams)
+        #save hyperparameters
+        self.save_hyperparameters()
+        
         self.encoder = MLP(
             [num_genes]
-            + [self.hparams["autoencoder_width"]] * self.hparams["autoencoder_depth"]
-            + [self.hparams["dim"]],
+            + [self.hparams.hparams['autoencoder_width']] * self.hparams.hparams['autoencoder_depth']
+            + [self.hparams.hparams['dim']],
             append_layer_width=append_layer_width,
             append_layer_position="first",
         )
 
         self.decoder = MLP(
-            [self.hparams["dim"]]
-            + [self.hparams["autoencoder_width"]] * self.hparams["autoencoder_depth"]
+            [self.hparams.hparams['dim']]
+            + [self.hparams.hparams['autoencoder_width']] * self.hparams.hparams['autoencoder_depth']
             + [num_genes * 2],
             last_layer_act=decoder_activation,
             append_layer_width=2 * append_layer_width if append_layer_width else None,
@@ -363,31 +343,31 @@ class ComPert(torch.nn.Module):
 
         if self.num_drugs > 0:
             self.adversary_drugs = MLP(
-                [self.hparams["dim"]]
-                + [self.hparams["adversary_width"]] * self.hparams["adversary_depth"]
+                [self.hparams.hparams['dim']]
+                + [self.hparams.hparams['adversary_width']] * self.hparams.hparams['adversary_depth']
                 + [self.num_drugs]
             )
 
             self.drug_embedding_encoder = MLP(
                 [self.drug_embedding_dimension]
-                + [self.hparams["embedding_encoder_width"]]
-                * self.hparams["embedding_encoder_depth"]
-                + [self.hparams["dim"]],
+                + [self.hparams.hparams['embedding_encoder_width']]
+                * self.hparams.hparams['embedding_encoder_depth']
+                + [self.hparams.hparams['dim']],
                 last_layer_act="linear",
             )
 
             self.loss_adversary_drugs = CELoss()
             
             # set dosers
-            assert doser_type in ("mlp", "sigm", "logsigm", "amortized", None)
+            assert doser_type in ("mlp", "sigm", "logsigm", "amortized", "original")
             if doser_type == "mlp":
                 self.dosers = torch.nn.ModuleList()
                 for _ in range(self.num_drugs):
                     self.dosers.append(
                         MLP(
                             [1]
-                            + [self.hparams["dosers_width"]]
-                            * self.hparams["dosers_depth"]
+                            + [self.hparams.hparams['dosers_width']]
+                            * self.hparams.hparams['dosers_depth']
                             + [1],
                             batch_norm=False,
                         )
@@ -396,43 +376,43 @@ class ComPert(torch.nn.Module):
                 # should this also have `batch_norm=False`?
                 self.dosers = MLP(
                     [self.drug_embedding_dimension + 1]
-                    + [self.hparams["dosers_width"]] * self.hparams["dosers_depth"]
+                    + [self.hparams.hparams['dosers_width']] * self.hparams.hparams['dosers_depth']
                     + [1],
                 )
             else:
-                assert doser_type in ("sigm", "logsigm", None)
+                assert doser_type in ("sigm", "logsigm", "original")
                 self.dosers = GeneralizedSigmoid(
-                    self.num_drugs, self.device, nonlin=doser_type
+                    self.num_drugs, nonlin=doser_type
                 )
             self.doser_type = doser_type
 
 
         if self.num_knockouts > 0:
             self.adversary_knockouts = MLP(
-                [self.hparams["dim"]]
-                + [self.hparams["adversary_width"]] * self.hparams["adversary_depth"]
+                [self.hparams.hparams['dim']]
+                + [self.hparams.hparams['adversary_width']] * self.hparams.hparams['adversary_depth']
                 + [self.num_knockouts]
             )
             self.knockout_embedding_encoder = MLP(
                 [self.knockout_embedding_dimension]
-                + [self.hparams["embedding_encoder_width"]]
-                * self.hparams["embedding_encoder_depth"]
-                + [self.hparams["dim"]],
+                + [self.hparams.hparams['embedding_encoder_width']]
+                * self.hparams.hparams['embedding_encoder_depth']
+                + [self.hparams.hparams['dim']],
                 last_layer_act="linear",
             )
 
             self.loss_adversary_knockout = CELoss()
             
             # set knockouts' effect
-            assert knockout_effect_type in ("mlp", "sigm", "logsigm", "amortized", None)
+            assert knockout_effect_type in ("mlp", "sigm", "logsigm", "amortized", "original")
             if knockout_effect_type == "mlp":
                 self.knockout_effects = torch.nn.ModuleList()
                 for _ in range(self.num_knockouts):
                     self.knockout_effects.append(
                         MLP(
                             [1]
-                            + [self.hparams["knockout_effects_width"]]
-                            * self.hparams["knockout_effects_depth"]
+                            + [self.hparams.hparams['knockout_effects_width']]
+                            * self.hparams.hparams['knockout_effects_depth']
                             + [1],
                             batch_norm=False,
                         )
@@ -441,14 +421,14 @@ class ComPert(torch.nn.Module):
                 # should this also have `batch_norm=False`?
                 self.knockout_effects = MLP(
                     [self.knockout_embedding_dimension + 1]
-                    + [self.hparams["knockout_effects_width"]] 
-                    * self.hparams["knockout_effects_depth"]
+                    + [self.hparams.hparams['knockout_effects_width']] 
+                    * self.hparams.hparams['knockout_effects_depth']
                     + [1],
                 )
             else:
-                assert knockout_effect_type in ("sigm", "logsigm", None)
+                assert knockout_effect_type in ("sigm", "logsigm", "original")
                 self.knockout_effects = GeneralizedSigmoid(
-                    self.num_knockouts, self.device, nonlin=knockout_effect_type
+                    self.num_knockouts, nonlin=knockout_effect_type
                 )
             self.knockout_effect_type = knockout_effect_type
         
@@ -465,24 +445,23 @@ class ComPert(torch.nn.Module):
             for num_covariate in self.num_covariates:
                 self.adversary_covariates.append(
                     MLP(
-                        [self.hparams["dim"]]
-                        + [self.hparams["adversary_width"]]
-                        * self.hparams["adversary_depth"]
+                        [self.hparams.hparams['dim']]
+                        + [self.hparams.hparams['adversary_width']]
+                        * self.hparams.hparams['adversary_depth']
                         + [num_covariate]
-                    )
+                    ).to(_device)
                 )
                 self.loss_adversary_covariates.append(CELoss())
                 self.covariates_embeddings.append(
-                    torch.nn.Embedding(num_covariate, self.hparams["dim"])
+                    torch.nn.Embedding(num_covariate, self.hparams.hparams['dim'], device=_device)
                 )
 
         self.loss_autoencoder = torch.nn.GaussianNLLLoss()
 
         self.iteration = 0
+        
 
-        self.to(self.device)
-
-        # optimizers
+    def configure_optimizers(self):
         has_drugs = self.num_drugs > 0
         has_knockouts = self.num_knockouts > 0
         has_covariates = self.num_covariates[0] > 0
@@ -499,11 +478,15 @@ class ComPert(torch.nn.Module):
         if has_covariates:
             for emb in self.covariates_embeddings:
                 _parameters.extend(get_params(emb))
-
-        self.optimizer_autoencoder = torch.optim.Adam(
+        optimizer_autoencoder = torch.optim.Adam(
             _parameters,
-            lr=self.hparams["autoencoder_lr"],
-            weight_decay=self.hparams["autoencoder_wd"],
+            lr=self.hparams.hparams['autoencoder_lr'],
+            weight_decay=self.hparams.hparams['autoencoder_wd'],
+        )
+        scheduler_autoencoder = torch.optim.lr_scheduler.StepLR(
+            optimizer_autoencoder,
+            step_size=self.hparams.hparams['step_size_lr'],
+            gamma=0.5,
         )
 
         _parameters = []
@@ -514,53 +497,69 @@ class ComPert(torch.nn.Module):
         if has_covariates:
             for adv in self.adversary_covariates:
                 _parameters.extend(get_params(adv))
-
-        self.optimizer_adversaries = torch.optim.Adam(
+        optimizer_adversaries = torch.optim.Adam(
             _parameters,
-            lr=self.hparams["adversary_lr"],
-            weight_decay=self.hparams["adversary_wd"],
+            lr=self.hparams.hparams['adversary_lr'],
+            weight_decay=self.hparams.hparams['adversary_wd'],
+        )
+        scheduler_adversary = torch.optim.lr_scheduler.StepLR(
+            optimizer_adversaries,
+            step_size=self.hparams.hparams['step_size_lr'],
+            gamma=0.5,
         )
 
-        if has_drugs:
-            self.optimizer_dosers = torch.optim.Adam(
+        if has_drugs and (self.doser_type != "original"):
+            optimizer_dosers = torch.optim.Adam(
                 self.dosers.parameters(),
-                lr=self.hparams["dosers_lr"],
-                weight_decay=self.hparams["dosers_wd"],
+                lr=self.hparams.hparams['dosers_lr'],
+                weight_decay=self.hparams.hparams['dosers_wd'],
             )
-        if has_knockouts:
-            self.optimizer_knockout_effects = torch.optim.Adam(
+            scheduler_dosers = torch.optim.lr_scheduler.StepLR(
+                optimizer_dosers,
+                step_size=self.hparams.hparams['step_size_lr'],
+                gamma=0.5,
+            )
+        else: 
+            optimizer_dosers = None
+            scheduler_dosers = None
+        if has_knockouts and (self.knockout_effect_type != "original"):
+            optimizer_knockout_effects = torch.optim.Adam(
                 self.knockout_effects.parameters(),
-                lr=self.hparams["knockout_effects_lr"],
-                weight_decay=self.hparams["knockout_effects_wd"],
+                lr=self.hparams.hparams['knockout_effects_lr'],
+                weight_decay=self.hparams.hparams['knockout_effects_wd'],
             )
-        # learning rate schedulers
-        self.scheduler_autoencoder = torch.optim.lr_scheduler.StepLR(
-            self.optimizer_autoencoder,
-            step_size=self.hparams["step_size_lr"],
-            gamma=0.5,
-        )
-
-        self.scheduler_adversary = torch.optim.lr_scheduler.StepLR(
-            self.optimizer_adversaries,
-            step_size=self.hparams["step_size_lr"],
-            gamma=0.5,
-        )
-
-        if has_drugs:
-            self.scheduler_dosers = torch.optim.lr_scheduler.StepLR(
-                self.optimizer_dosers,
-                step_size=self.hparams["step_size_lr"],
+            scheduler_knockout_effects = torch.optim.lr_scheduler.StepLR(
+                optimizer_knockout_effects,
+                step_size=self.hparams.hparams['step_size_lr'],
                 gamma=0.5,
             )
+        else: 
+            optimizer_knockout_effects = None
+            scheduler_knockout_effects = None
 
-        if has_knockouts:
-            self.scheduler_knockout_effects = torch.optim.lr_scheduler.StepLR(
-                self.optimizer_knockout_effects,
-                step_size=self.hparams["step_size_lr"],
-                gamma=0.5,
-            )
+        if optimizer_dosers is not None:
+            if optimizer_knockout_effects is not None:
+                return [{'optimizer': optimizer_autoencoder, "lr_scheduler": {"scheduler": scheduler_autoencoder}},
+                        {'optimizer': optimizer_adversaries, "lr_scheduler": {"scheduler": scheduler_adversary}},
+                        {'optimizer': optimizer_dosers, "lr_scheduler": {"scheduler": scheduler_dosers}},
+                        {'optimizer': optimizer_knockout_effects, "lr_scheduler": {"scheduler": scheduler_knockout_effects}}
+                    ]
+            else: 
+                return [{'optimizer': optimizer_autoencoder, "lr_scheduler": {"scheduler": scheduler_autoencoder}},
+                        {'optimizer': optimizer_adversaries, "lr_scheduler": {"scheduler": scheduler_adversary}},
+                        {'optimizer': optimizer_dosers, "lr_scheduler": {"scheduler": scheduler_dosers}}
+                    ]
+        else:
+            if optimizer_knockout_effects is not None:
+                return [{'optimizer': optimizer_autoencoder, "lr_scheduler": {"scheduler": scheduler_autoencoder}},
+                        {'optimizer': optimizer_adversaries, "lr_scheduler": {"scheduler": scheduler_adversary}},
+                        {'optimizer': optimizer_knockout_effects, "lr_scheduler": {"scheduler": scheduler_knockout_effects}}
+                    ]
+            else: 
+                return [{'optimizer': optimizer_autoencoder, "lr_scheduler": {"scheduler": scheduler_autoencoder}},
+                        {'optimizer': optimizer_adversaries, "lr_scheduler": {"scheduler": scheduler_adversary}}
+                    ]
 
-        self.history = {"epoch": [], "stats_epoch": []}
 
     def set_hparams_(self, seed, hparams):
         """
@@ -572,7 +571,7 @@ class ComPert(torch.nn.Module):
         default = seed == 0
         torch.manual_seed(seed)
         np.random.seed(seed)
-        self.hparams = {
+        hyperparameters = {
             "dim": 256 if default else int(np.random.choice([128, 256, 512])),
             "dosers_width": 64 if default else int(np.random.choice([32, 64, 128])),
             "dosers_depth": 2 if default else int(np.random.choice([1, 2, 3])),
@@ -616,11 +615,12 @@ class ComPert(torch.nn.Module):
         # the user may fix some hparams
         if hparams != "":
             if isinstance(hparams, str):
-                self.hparams.update(json.loads(hparams))
+                hyperparameters.update(json.loads(hparams))
             else:
-                self.hparams.update(hparams)
+                hyperparameters.update(hparams)
 
-        return self.hparams
+        return hyperparameters
+
 
     def compute_drug_embeddings_(self, drugs_idx, dosages, drugs_embeddings):
         """
@@ -637,10 +637,7 @@ class ComPert(torch.nn.Module):
         """
         assert (drugs_idx is not None and dosages is not None)
 
-        drugs_idx, dosages, drugs_embeddings = _move_inputs(
-            drugs_idx, dosages, drugs_embeddings, device=self.device
-        )
-    
+        
         scaled_dosages = []
         if self.doser_type == "mlp":
             for idx, dosage in zip(drugs_idx, dosages):
@@ -671,7 +668,7 @@ class ComPert(torch.nn.Module):
                     scaled_dosages.append(stacked_dosages[stacked_idx[i-1]:stacked_idx[i]].view(-1))
 
         else:
-            assert self.doser_type in ("sigm", "logsigm", None)
+            assert self.doser_type in ("sigm", "logsigm", "original")
             for idx, dosage in zip(drugs_idx, dosages):
                 scaled_dosages.append(self.dosers(dosage, idx))
 
@@ -682,6 +679,7 @@ class ComPert(torch.nn.Module):
         latent_drugs = [torch.einsum("b,bd->bd", [scaled_dosage, latent_drug]) for 
                         scaled_dosage, latent_drug in zip(scaled_dosages, latent_drugs)]
         return torch.stack([latent_drug.sum(dim=0) for latent_drug in latent_drugs])
+
 
     def compute_knockout_embeddings_(self, knockouts_idx, knockouts_embeddings):
         """
@@ -695,10 +693,7 @@ class ComPert(torch.nn.Module):
         @return: a tensor of shape [batch_size, knockout_embedding_dimension]
         """
         
-        knockouts_idx, knockouts_embeddings = _move_inputs(
-            knockouts_idx, knockouts_embeddings, device=self.device
-        )
-        effects = [torch.ones_like(idx, dtype=torch.float32).to(self.device) for idx in knockouts_idx]
+        effects = [torch.ones_like(idx, dtype=torch.float32) for idx in knockouts_idx]
         scaled_effects = []
         if self.knockout_effect_type == "mlp":
             for idx, effect in zip(knockouts_idx, effects):
@@ -729,7 +724,7 @@ class ComPert(torch.nn.Module):
 
 
         else:
-            assert self.knockout_effect_type in ("sigm", "logsigm", None)
+            assert self.knockout_effect_type in ("sigm", "logsigm", "original")
             for idx, effect in zip(knockouts_idx, effects):
                 scaled_effects.append(self.knockout_effects(effect, idx))
 
@@ -739,6 +734,7 @@ class ComPert(torch.nn.Module):
         latent_knockouts = [torch.einsum("b,bd->bd", [scaled_effect, latent_knockout]) for 
                             scaled_effect, latent_knockout in zip(scaled_effects, latent_knockouts)]
         return torch.stack([latent_knockout.sum(dim=0) for latent_knockout in latent_knockouts])
+
 
     def predict(
         self,
@@ -756,14 +752,9 @@ class ComPert(torch.nn.Module):
         cells in `genes` with covariates been treated with perturbations
         """
         
-        genes, drugs_idx, dosages, drugs_embeddings, knockouts_idx, knockouts_embeddings, covariates_idx = _move_inputs(
-            genes, drugs_idx, dosages, drugs_embeddings, knockouts_idx, knockouts_embeddings, covariates_idx, device=self.device
-        )
-
         latent_basal = self.encoder(genes)
 
         latent_treated = latent_basal
-
         if self.num_drugs > 0:
             drug_embedding = self.compute_drug_embeddings_(
                 drugs_idx=drugs_idx, dosages=dosages, drugs_embeddings=drugs_embeddings
@@ -776,7 +767,6 @@ class ComPert(torch.nn.Module):
             latent_treated = latent_treated + knockout_embedding
         if self.num_covariates[0] > 0:
             for cov_type, emb_cov in enumerate(self.covariates_embeddings):
-                emb_cov = emb_cov.to(self.device)
                 cov_idx = covariates_idx[cov_type]
                 latent_treated = latent_treated + emb_cov(cov_idx)
 
@@ -793,38 +783,22 @@ class ComPert(torch.nn.Module):
 
         return normalized_reconstructions
 
-    def early_stopping(self, score):
-        """
-        Possibly early-stops training.
-        """
-        #is there a need to store the model params corresponding to the best score?
-        if score is None:
-            # TODO don't really know what to do here
-            logging.warning("Early stopping score was None!")
-        elif score > self.best_score:
-            self.best_score = score
-            self.patience_trials = 0
-        else:
-            self.patience_trials += 1
-
-        return self.patience_trials > self.patience
-
-    def update(
+    
+    def training_step(
         self,
-        genes,
-        drugs_idx=None,
-        dosages=None,
-        drugs_embeddings=None,
-        knockouts_idx=None,
-        knockouts_embeddings=None,
-        covariates_idx=None,
+        batch,
+        batch_idx
         ):
-        """
-        Update model's parameters given a minibatch of genes, drugs, knockouts and
-        covariates.
-        """
 
-
+        genes, drugs_idx, dosages, drugs_embeddings, knockouts_idx, knockouts_embeddings, covariates_idx = (
+            batch[0],
+            batch[1],
+            batch[2],
+            batch[3],
+            batch[4],
+            batch[5],
+            batch[6:]
+        )
         gene_reconstructions, latent_basal = self.predict(
             genes=genes,
             drugs_idx=drugs_idx,
@@ -842,24 +816,38 @@ class ComPert(torch.nn.Module):
         reconstruction_loss = self.loss_autoencoder(input=mean, target=genes, var=var)
 
 
-        adversary_drugs_loss = torch.tensor([0.0], device=self.device)
+        if (self.num_drugs > 0) and (self.doser_type != "original"):
+            if (self.num_knockouts > 0) and (self.knockout_effect_type != "original"):
+                optimizer_autoencoder, optimizer_adversaries, optimizer_dosers, optimizer_knockout_effects = self.optimizers()
+                scheduler_autoencoder, scheduler_adversary, scheduler_dosers, scheduler_knockout_effects = self.lr_schedulers()
+            else:
+                optimizer_autoencoder, optimizer_adversaries, optimizer_dosers = self.optimizers()
+                scheduler_autoencoder, scheduler_adversary, scheduler_dosers = self.lr_schedulers()
+        else:
+            if (self.num_knockouts > 0) and (self.knockout_effect_type != "original"):
+                optimizer_autoencoder, optimizer_adversaries, optimizer_knockout_effects = self.optimizers()
+                scheduler_autoencoder, scheduler_adversary, scheduler_knockout_effects = self.lr_schedulers()
+            else:
+                optimizer_autoencoder, optimizer_adversaries = self.optimizers()
+                scheduler_autoencoder, scheduler_adversary = self.lr_schedulers()
+
+        adversary_drugs_loss = torch.tensor([0.0], device=_device)
         if self.num_drugs > 0:
             adversary_drugs_predictions = self.adversary_drugs(latent_basal)
             adversary_drugs_loss = self.loss_adversary_drugs(
                 adversary_drugs_predictions, drugs_idx
             )
-        adversary_knockouts_loss = torch.tensor([0.0], device=self.device)
+        adversary_knockouts_loss = torch.tensor([0.0], device=_device)
         if self.num_knockouts > 0:
             adversary_knockouts_predictions = self.adversary_knockouts(latent_basal)
             adversary_knockouts_loss = self.loss_adversary_knockout(
                 adversary_knockouts_predictions, knockouts_idx
             )
 
-        adversary_covariates_loss = torch.tensor([0.0], device=self.device)
+        adversary_covariates_loss = torch.tensor([0.0], device=_device)
         if self.num_covariates[0] > 0:
             adversary_covariate_predictions = []
             for i, adv in enumerate(self.adversary_covariates):
-                adv = adv.to(self.device)
                 adversary_covariate_predictions.append(adv(latent_basal))
                 adversary_covariates_loss += self.loss_adversary_covariates[i](
                     adversary_covariate_predictions[-1], covariates_idx[i]
@@ -867,19 +855,17 @@ class ComPert(torch.nn.Module):
 
 
         # place-holders for when adversary is not executed
-        adv_drugs_grad_penalty = torch.tensor([0.0], device=self.device)
-        adv_knockouts_grad_penalty = torch.tensor([0.0], device=self.device)
-        adv_covs_grad_penalty = torch.tensor([0.0], device=self.device)
+        adv_drugs_grad_penalty = torch.tensor([0.0], device=_device)
+        adv_knockouts_grad_penalty = torch.tensor([0.0], device=_device)
+        adv_covs_grad_penalty = torch.tensor([0.0], device=_device)
 
-        if (self.iteration % self.hparams["adversary_steps"]) == 0:
-
+        if ((self.iteration) % self.hparams.hparams['adversary_steps']) == 0:
             def compute_gradient_penalty(output, input):
                 grads = torch.autograd.grad(output, input, create_graph=True)
                 grads = grads[0].pow(2).mean()
                 return grads
 
             if self.num_drugs > 0:
-                
                 adv_drugs_grad_penalty = compute_gradient_penalty(
                     adversary_drugs_predictions.sum(), latent_basal
                 )
@@ -888,42 +874,50 @@ class ComPert(torch.nn.Module):
                     adversary_knockouts_predictions.sum(), latent_basal
                 )
             if self.num_covariates[0] > 0:
-                adv_covs_grad_penalty = torch.tensor([0.0], device=self.device)
+                adv_covs_grad_penalty = torch.tensor([0.0], device=_device)
                 for pred in adversary_covariate_predictions:
                     adv_covs_grad_penalty += compute_gradient_penalty(
                         pred.sum(), latent_basal
                     )
-
-            self.optimizer_adversaries.zero_grad()
-            (
-                adversary_drugs_loss
-                + self.hparams["penalty_adversary"] * adv_drugs_grad_penalty
-                + adversary_knockouts_loss
-                + self.hparams["penalty_adversary"] * adv_knockouts_grad_penalty
-                + adversary_covariates_loss
-                + self.hparams["penalty_adversary"] * adv_covs_grad_penalty
-            ).backward()
-            self.optimizer_adversaries.step()
+            optimizer_adversaries.zero_grad()
+            self.manual_backward(
+                                    adversary_drugs_loss
+                                    + self.hparams.hparams['penalty_adversary'] * adv_drugs_grad_penalty
+                                    + adversary_knockouts_loss
+                                    + self.hparams.hparams['penalty_adversary'] * adv_knockouts_grad_penalty
+                                    + adversary_covariates_loss
+                                    + self.hparams.hparams['penalty_adversary'] * adv_covs_grad_penalty
+            )
+            optimizer_adversaries.step()
         else:
-            self.optimizer_autoencoder.zero_grad()
-            if self.num_drugs > 0:
-                self.optimizer_dosers.zero_grad()
-            if self.num_knockouts > 0:
-                self.optimizer_knockout_effects.zero_grad()
-            (
-                reconstruction_loss
-                - self.hparams["reg_adversary_drug"] * adversary_drugs_loss
-                - self.hparams["reg_adversary_knockout"] * adversary_knockouts_loss
-                - self.hparams["reg_adversary_cov"] * adversary_covariates_loss
-            ).backward()
-            self.optimizer_autoencoder.step()
-            if self.num_drugs > 0:
-                self.optimizer_dosers.step()
-            if self.num_knockouts > 0:
-                self.optimizer_knockout_effects.step()
-        self.iteration += 1
+            optimizer_autoencoder.zero_grad()
+            if (self.num_drugs > 0) and (self.doser_type != "original"):
+                optimizer_dosers.zero_grad()
+            if (self.num_knockouts > 0) and (self.knockout_effect_type != "original"):
+                optimizer_knockout_effects.zero_grad()
+            self.manual_backward(
+                                reconstruction_loss
+                                - self.hparams.hparams['reg_adversary_drug'] * adversary_drugs_loss
+                                - self.hparams.hparams['reg_adversary_knockout'] * adversary_knockouts_loss
+                                - self.hparams.hparams['reg_adversary_cov'] * adversary_covariates_loss
+            )
+            optimizer_autoencoder.step()
+            if (self.num_drugs > 0) and (self.doser_type != "original"):
+                optimizer_dosers.step()
+            if (self.num_knockouts > 0) and (self.knockout_effect_type != "original"):
+                optimizer_knockout_effects.step()
 
-        return {
+        if self.trainer.is_last_batch:
+            scheduler_autoencoder.step()
+            scheduler_adversary.step()
+            if (self.num_drugs > 0) and (self.doser_type != "original"):
+                scheduler_dosers.step()
+            if (self.num_knockouts > 0) and (self.knockout_effect_type != "original"):
+                scheduler_knockout_effects.step()
+
+
+        self.iteration += 1
+        train_stats = {
             "loss_reconstruction": reconstruction_loss.item(),
             "loss_adv_drugs": adversary_drugs_loss.item(),
             "loss_adv_knockouts": adversary_knockouts_loss.item(),
@@ -931,8 +925,105 @@ class ComPert(torch.nn.Module):
             "penalty_adv_drugs": adv_drugs_grad_penalty.item(),
             "penalty_adv_knockouts": adv_knockouts_grad_penalty.item(),
             "penalty_adv_covariates": adv_covs_grad_penalty.item(),
-            
         }
+        self.log_dict(train_stats, on_step=True, on_epoch=True, prog_bar=True, 
+                      logger=True, batch_size=self.hparams.hparams['batch_size'])
+        
+
+    def validation_step(self, batch, batch_idx):
+        if not self.hparams.training_hparams['full_eval_during_train']:
+            logging.info(f"Running accuracy evaluation (Epoch:{self.current_epoch})")
+            dataset_test_treated, dataset_test_control_genes = batch
+            evaluation_r2_scores = evaluate_r2(
+                    self,
+                    dataset_test_treated,
+                    dataset_test_control_genes,
+                )
+            evaluation_r2_sc_scores = evaluate_r2_sc(
+                 self,
+                 dataset_test_treated
+                )
+            self.log_dict({
+                'mean_r2_score': evaluation_r2_scores[0],
+                'mean_r2_score_de': evaluation_r2_scores[1],
+                'var_score': evaluation_r2_scores[2],
+                'var_score_de': evaluation_r2_scores[3],
+                'average_r2_score': np.mean(evaluation_r2_scores),
+                'mean_r2_sc_score': evaluation_r2_sc_scores[0],
+                'mean_r2_sc_score_de': evaluation_r2_sc_scores[1],
+                'var_sc_score': evaluation_r2_sc_scores[2],
+                'var_sc_score_de': evaluation_r2_sc_scores[3],
+                'average_r2_sc_score': np.mean(evaluation_r2_sc_scores)
+            }, batch_size=1)
+        else:
+            logging.info(f"Running the full evaluation (Epoch:{self.current_epoch})")
+            datasets = batch
+            evaluation_stats = evaluate(
+                                        self,
+                                        datasets,
+                                        run_disentangle=self.hparams.training_hparams['run_eval_disentangle'],
+                                        run_r2=self.hparams.training_hparams['run_eval_r2'],
+                                        run_r2_sc=self.hparams.training_hparams['run_eval_r2_sc'],
+                                        run_logfold=self.hparams.training_hparams['run_eval_logfold'],
+                        )
+            self.log_dict(evaluation_stats, batch_size=1)
+            if self.hparams.test_hparams['run_eval_r2']:
+                self.log('average_r2_score', 
+                        np.mean([evaluation_stats['test_mean_score'],
+                        evaluation_stats['test_mean_score_de'],
+                        evaluation_stats['test_var_score'],
+                        evaluation_stats['test_var_score_de']]),
+                        batch_size=1)
+
+
+    def on_save_checkpoint(self, checkpoint):
+        #need to save the states of covariates separately
+        checkpoint['state_dict_covs'] = {}
+        checkpoint['state_dict_covs']['adversary_covariates'] = [
+                                adversary_covariates.state_dict()
+                                for adversary_covariates in self.adversary_covariates
+                                ]
+        checkpoint['state_dict_covs']['covariates_embeddings'] = [
+                                covariate_embedding.state_dict()
+                                for covariate_embedding in self.covariates_embeddings
+                            ]
+        
+
+    def on_load_checkpoint(self, checkpoint):
+        #need to load the states of covariates separately
+        if self.num_covariates[0] > 0:
+                for embedding, state_dict in zip(
+                    self.covariates_embeddings, checkpoint['state_dict_covs']['covariates_embeddings']
+                ):
+                    embedding.load_state_dict(state_dict)
+                for adv, state_dict in zip(
+                    self.adversary_covariates, checkpoint['state_dict_covs']['adversary_covariates']
+                ):
+                    adv.load_state_dict(state_dict)
+
+
+    def test_step(self, batch, batch_idx):
+        datasets = batch
+        evaluation_stats = evaluate(
+                                    self,
+                                    datasets,
+                                    run_disentangle=self.hparams.test_hparams['run_eval_disentangle'],
+                                    run_r2=self.hparams.test_hparams['run_eval_r2'],
+                                    run_r2_sc=self.hparams.test_hparams['run_eval_r2_sc'],
+                                    run_logfold=self.hparams.test_hparams['run_eval_logfold'],
+                    )
+        self.log_dict(evaluation_stats, batch_size=1)
+        if self.hparams.test_hparams['run_eval_r2']:
+            self.log('average_r2_score', 
+                    np.mean([evaluation_stats['test_mean_score'],
+                                                    evaluation_stats['test_mean_score_de'],
+                                                    evaluation_stats['test_var_score'],
+                                                    evaluation_stats['test_var_score_de']]),
+                    batch_size=1)
+        
+
+
+
 
     @classmethod
     def defaults(self):
