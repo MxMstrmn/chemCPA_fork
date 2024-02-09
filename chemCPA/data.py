@@ -1,6 +1,7 @@
 import logging
 import warnings
 from typing import List, Optional, Union
+from lightning.pytorch.utilities.types import EVAL_DATALOADERS, TRAIN_DATALOADERS
 
 import numpy as np
 import pandas as pd
@@ -8,6 +9,15 @@ import scanpy as sc
 import torch
 from anndata import AnnData
 from rdkit import Chem
+import lightning as L
+from torch.utils.data import DataLoader
+
+if torch.cuda.is_available():
+    _device = "cuda"
+elif torch.backends.mps.is_available():
+    _device = "mps"
+else:
+    _device = "cpu"
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
@@ -83,7 +93,11 @@ class Dataset:
         else:
             data = sc.read(data)
         logging.info(f"Finished data loading.")
-        self.genes = torch.Tensor(data.X.A)
+        #be flexible about the dense or sparse matrices
+        try:
+            self.genes = torch.Tensor(data.X.A)
+        except:
+            self.genes = torch.Tensor(data.X) 
         self.num_genes = self.genes.shape[1]
         self.var_names = data.var_names
 
@@ -148,12 +162,12 @@ class Dataset:
             elif isinstance(drugs_embeddings, str):
                 drugs_embeddings_df = pd.read_parquet(drugs_embeddings)
                 drugs_embeddings = torch.tensor(drugs_embeddings_df.loc[self.canon_smiles_unique_sorted].values, 
-                             dtype=torch.float32, device=self.device)
+                             dtype=torch.float32)
                 self.drugs_embeddings = torch.nn.Embedding.from_pretrained(drugs_embeddings, freeze=True)
             else:
                 # maybe provided with None, create random embeddings
                 self.drugs_embeddings = torch.nn.Embedding(self.num_drugs, 256, _freeze=True)
-
+            self.drug_embedding_dimension = self.drugs_embeddings.embedding_dim
         else:
             self.drugs_names = None
             self.dose_names = None
@@ -163,6 +177,7 @@ class Dataset:
             self.dosages = None
             self.drug_ctrl_name = None
             self.drugs_embeddings = None
+            self.drug_embedding_dimension = None
 
         if knockout_key is not None:
             self.knockouts_names = np.array(data.obs[knockout_key].values)
@@ -190,17 +205,17 @@ class Dataset:
                 knockouts_idx.append(knockouts_combos_idx)
             self.knockouts_idx = np.array(knockouts_idx, dtype=object)
 
-            if isinstance(knockouts_embeddings, torch.nn.Embedding):
-                self.knockouts_embeddings = knockouts_embeddings
+            if isinstance(knockouts_embeddings, dict):
+                self.knockouts_embeddings = {self._knockouts_name_to_idx[name]: knockouts_embeddings[name] for name in self.knockouts_names_unique_sorted}
             elif isinstance(knockouts_embeddings, str):
-                knockouts_embeddings_df = pd.read_parquet(knockouts_embeddings)
-                knockouts_embeddings = torch.tensor(knockouts_embeddings_df.loc[self.knockouts_names_unique_sorted].values, 
-                             dtype=torch.float32, device=self.device)
-                self.knockouts_embeddings = torch.nn.Embedding.from_pretrained(knockouts_embeddings, freeze=True)
+                self.knockouts_embeddings = torch.load(knockouts_embeddings, map_location=torch.device('cpu'))
+                self.knockouts_embeddings = {self._knockouts_name_to_idx[name]: self.knockouts_embeddings[name] for name in self.knockouts_names_unique_sorted}
             else:
                 # maybe provided with None, create random embeddings
-                self.knockouts_embeddings = torch.nn.Embedding(self.num_knockouts, 256, _freeze=True)
-
+                self.knockouts_embeddings = {self._knockouts_name_to_idx[name]: torch.randn(256) for name in self.knockouts_names_unique_sorted}
+            self.knockouts_embeddings = torch.nn.Embedding.from_pretrained(torch.stack([self.knockouts_embeddings[i] for i in range(self.num_knockouts)]),
+                                                                           freeze=True)
+            self.knockout_embedding_dimension = self.knockouts_embeddings.embedding_dim
         else:
             self.knockouts_names = None
             self.knockouts_names_unique_sorted = None
@@ -208,6 +223,7 @@ class Dataset:
             self.knockouts_idx = None
             self.knockout_ctrl_name = None
             self.knockouts_embeddings = None
+            self.knockout_embedding_dimension = None
 
         if isinstance(covariate_keys, list) and covariate_keys:
             if not len(covariate_keys) == len(set(covariate_keys)):
@@ -303,8 +319,10 @@ class SubDataset:
         self.covariate_keys = dataset.covariate_keys
         self.smiles_key = dataset.smiles_key
         self.drugs_embeddings = dataset.drugs_embeddings
+        self.drug_embedding_dimension = dataset.drug_embedding_dimension
         self.knockouts_embeddings = dataset.knockouts_embeddings
-
+        self.knockout_embedding_dimension = dataset.knockout_embedding_dimension
+        
         self.genes = dataset.genes[indices]
         self.drugs_idx = indx(dataset.drugs_idx, indices)
         self.dosages = indx(dataset.dosages, indices)
@@ -387,3 +405,104 @@ def load_dataset_splits(
         return splits, dataset
     else:
         return splits
+
+
+def custom_collate_train(batch):
+    genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, cov = zip(*batch)
+    genes = torch.stack(genes, 0)
+    drugs_idx = None if drugs_idx[0] is None else [d for d in drugs_idx]
+    dosages = None if dosages[0] is None else [d for d in dosages]
+    drugs_emb = None if drugs_emb[0] is None else [d for d in drugs_emb]
+    knockouts_idx = None if knockouts_idx[0] is None else [d for d in knockouts_idx]
+    knockouts_emb = None if knockouts_emb[0] is None else [d for d in knockouts_emb]
+    cov = None if cov[0] is None else  torch.stack(cov, 0)
+    return [genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, cov]
+
+
+def custom_collate_validate_r2(batch):
+    dataset_test_treated = batch[0][0]
+    dataset_test_control_genes = batch[0][1].genes
+    return dataset_test_treated, dataset_test_control_genes
+
+
+def custom_collate_full_evaluation(batch):
+    datasets = batch[0]
+    return datasets
+
+
+class DataModule(L.LightningDataModule):
+    def __init__(self,
+                batch_size: int,
+                full_eval_during_train: bool,
+                dataset_path: str,
+                drug_key: Union[str, None],
+                dose_key: Union[str, None],
+                knockout_key: Union[str, None],
+                covariate_keys: Union[list, str, None],
+                smiles_key: Union[str, None],
+                pert_category: str = "cov_geneid",
+                split_key: str = "split",
+                degs_key='rank_genes_groups_cov',
+                return_dataset: bool = False,
+                drugs_embeddings = None,
+                knockouts_embeddings = None
+                ):
+        super().__init__()
+        self.batch_size = batch_size
+        self.full_eval_during_train = full_eval_during_train
+        if return_dataset:
+            self.datasets, self.dataset = load_dataset_splits(dataset_path,
+                                                drug_key,
+                                                dose_key,
+                                                knockout_key,
+                                                covariate_keys,
+                                                smiles_key,
+                                                pert_category = pert_category,
+                                                split_key = split_key,
+                                                degs_key=degs_key,
+                                                return_dataset = return_dataset,
+                                                drugs_embeddings = drugs_embeddings,
+                                                knockouts_embeddings = knockouts_embeddings)
+        else:
+            self.datasets = load_dataset_splits(dataset_path,
+                                                drug_key,
+                                                dose_key,
+                                                knockout_key,
+                                                covariate_keys,
+                                                smiles_key,
+                                                pert_category = pert_category,
+                                                split_key = split_key,
+                                                degs_key=degs_key,
+                                                return_dataset = return_dataset,
+                                                drugs_embeddings = drugs_embeddings,
+                                                knockouts_embeddings = knockouts_embeddings)
+        
+    def train_dataloader(self):
+        return DataLoader(
+                        self.datasets["training"],
+                        batch_size=self.batch_size,
+                        collate_fn=custom_collate_train,
+                        shuffle=True
+                    )
+    def val_dataloader(self):
+        if self.full_eval_during_train:
+            return DataLoader(
+                            [self.datasets],
+                            batch_size= 1,
+                            collate_fn = custom_collate_full_evaluation,
+                            shuffle=False
+                            )
+        else:
+            return DataLoader(
+                            [[self.datasets["test_treated"], self.datasets['test_control']]],
+                            batch_size= 1,
+                            collate_fn = custom_collate_validate_r2,
+                            shuffle=False
+                            )
+    def test_dataloader(self):
+        return DataLoader(
+                        [self.datasets],
+                        batch_size= 1,
+                        collate_fn = custom_collate_full_evaluation,
+                        shuffle=False
+                        )

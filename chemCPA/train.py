@@ -9,7 +9,9 @@ from torchmetrics import R2Score
 
 import chemCPA.data
 from chemCPA.data import SubDataset
-from chemCPA.model import MLP, ComPert
+import lightning as L
+from collections import OrderedDict
+
 
 if torch.cuda.is_available():
     _device = "cuda"
@@ -18,21 +20,26 @@ elif torch.backends.mps.is_available():
 else:
     _device = "cpu"
 
+
+def _move_inputs(*inputs):
+    def mv_input(x):
+        if x is None:
+            return None
+        elif isinstance(x, torch.Tensor):
+            return x.to(_device)
+        elif isinstance(x, list):
+            return [mv_input(y) for y in x]
+        elif isinstance(x, np.ndarray):
+            return [mv_input(y) for y in x]
+
+    return [mv_input(x) for x in inputs]
+
+
 def bool2idx(x):
     """
     Returns the indices of the True-valued entries in a boolean array `x`
     """
     return np.where(x)[0]
-
-
-def repeat_n(x, n):
-    """
-    Returns an n-times repeated version of the Tensor x,
-    repetition dimension is axis 0
-    """
-    # copy tensor to device BEFORE replicating it n times
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    return x.to(device).view(1, -1).repeat(n, 1)
 
 
 def mean(x: list):
@@ -42,20 +49,94 @@ def mean(x: list):
     return np.mean(x) if len(x) else -1
 
 
-def compute_prediction(autoencoder: ComPert, genes, drugs=None, knockouts=None, covs=None):
+class MLP(L.LightningModule):
+    """
+    A multilayer perceptron with ReLU activations and optional BatchNorm.
+
+    Careful: if activation is set to ReLU, ReLU is only applied to the first half of NN outputs!
+    """
+
+    def __init__(
+        self,
+        sizes,
+        batch_norm=True,
+        last_layer_act="linear",
+        append_layer_width=None,
+        append_layer_position=None,
+    ):
+        super(MLP, self).__init__()
+        layers = []
+        for s in range(len(sizes) - 1):
+            layers += [
+                torch.nn.Linear(sizes[s], sizes[s + 1]),
+                torch.nn.BatchNorm1d(sizes[s + 1])
+                if batch_norm and s < len(sizes) - 2
+                else None,
+                torch.nn.ReLU(),
+            ]
+
+        layers = [l for l in layers if l is not None][:-1]
+        self.activation = last_layer_act
+        if self.activation == "linear":
+            pass
+        elif self.activation == "ReLU":
+            self.relu = torch.nn.ReLU()
+        else:
+            raise ValueError("last_layer_act must be one of 'linear' or 'ReLU'")
+
+        # We add another layer either at the front / back of the sequential model. It gets a different name
+        # `append_XXX`. The naming of the other layers stays consistent.
+        # This allows us to load the state dict of the "non_appended" MLP without errors.
+        if append_layer_width:
+            assert append_layer_position in ("first", "last")
+            if append_layer_position == "first":
+                layers_dict = OrderedDict()
+                layers_dict["append_linear"] = torch.nn.Linear(
+                    append_layer_width, sizes[0]
+                )
+                layers_dict["append_bn1d"] = torch.nn.BatchNorm1d(sizes[0])
+                layers_dict["append_relu"] = torch.nn.ReLU()
+                for i, module in enumerate(layers):
+                    layers_dict[str(i)] = module
+            else:
+                layers_dict = OrderedDict(
+                    {str(i): module for i, module in enumerate(layers)}
+                )
+                layers_dict["append_bn1d"] = torch.nn.BatchNorm1d(sizes[-1])
+                layers_dict["append_relu"] = torch.nn.ReLU()
+                layers_dict["append_linear"] = torch.nn.Linear(
+                    sizes[-1], append_layer_width
+                )
+        else:
+            layers_dict = OrderedDict(
+                {str(i): module for i, module in enumerate(layers)}
+            )
+
+        self.network = torch.nn.Sequential(layers_dict)
+
+    def forward(self, x):
+        if self.activation == "ReLU":
+            x = self.network(x)
+            dim = x.size(1) // 2
+            return torch.cat((self.relu(x[:, :dim]), x[:, dim:]), dim=1)
+        return self.network(x)
+
+
+def compute_prediction(autoencoder, genes, drugs=None, knockouts=None, covs=None):
     """
     Computes the prediction of a ComPert `autoencoder` and
     directly splits into `mean` and `variance` predictions
     """
     
+    #since in the model validate_step, due to dataloader issue, need to manually put the data on device
     genes_pred = autoencoder.predict(
         genes=genes,
-        drugs_idx=drugs[0] if (drugs is not None) else None,
-        dosages=drugs[1] if (drugs is not None) else None,
-        drugs_embeddings=drugs[2] if (drugs is not None) else None,
-        knockouts_idx=knockouts[0] if (knockouts is not None) else None,
-        knockouts_embeddings=knockouts[1] if (knockouts is not None) else None,
-        covariates_idx=covs if (covs is not None) else None,
+        drugs_idx=_move_inputs(drugs[0])[0] if (drugs is not None) else None,
+        dosages=_move_inputs(drugs[1])[0] if (drugs is not None) else None,
+        drugs_embeddings=_move_inputs(drugs[2])[0] if (drugs is not None) else None,
+        knockouts_idx=_move_inputs(knockouts[0])[0] if (knockouts is not None) else None,
+        knockouts_embeddings=_move_inputs(knockouts[1])[0] if (knockouts is not None) else None,
+        covariates_idx=_move_inputs(covs)[0] if (covs is not None) else None,
         return_latent_basal=False
     ).detach()
     #delete [0], don't know why it is here
@@ -78,7 +159,7 @@ def compute_r2(y_true, y_pred):
 
 
 def evaluate_logfold_r2(
-    autoencoder: ComPert, ds_treated: SubDataset, ds_ctrl: SubDataset
+    autoencoder, ds_treated: SubDataset, ds_ctrl: SubDataset, return_mean: bool=True
 ):
     logfold_score = []
     signs_score = []
@@ -168,7 +249,11 @@ def evaluate_logfold_r2(
 
         logfold_score.append(r2)
         signs_score.append(acc_signs.item())
-    return mean(logfold_score), mean(signs_score)
+
+    if return_mean:
+        return mean(logfold_score), mean(signs_score)
+    else: 
+        return [logfold_score, signs_score]
 
 
 def evaluate_disentanglement(autoencoder, data: chemCPA.data.Dataset):
@@ -182,24 +267,25 @@ def evaluate_disentanglement(autoencoder, data: chemCPA.data.Dataset):
     would be None
 
     """
-
+    start_time = time.time()
     # generate random indices to subselect the dataset
-    print(f"Size of disentanglement testdata: {len(data)}")
+    logging.info(f"Size of disentanglement testdata: {len(data)}")
+
 
     with torch.no_grad():
             _, latent_basal = autoencoder.predict(
-                genes=data.genes,
-                drugs_idx=data.drugs_idx,
-                dosages=data.dosages,
-                drugs_embeddings = [data.drugs_embeddings(i) for i in data.drugs_idx] if
+                genes=_move_inputs(data.genes)[0],
+                drugs_idx=_move_inputs(data.drugs_idx)[0],
+                dosages=_move_inputs(data.dosages)[0],
+                drugs_embeddings = [_move_inputs(data.drugs_embeddings(i))[0] for i in data.drugs_idx] if
                 data.drugs_idx is not None else None,
-                knockouts_idx = data.knockouts_idx,
-                knockouts_embeddings = [data.knockouts_embeddings(i) for i in data.knockouts_idx] if
+                knockouts_idx = _move_inputs(data.knockouts_idx)[0],
+                knockouts_embeddings = [_move_inputs(data.knockouts_embeddings(i))[0] for i in data.knockouts_idx] if
                 data.knockouts_idx is not None else None,
-                covariates_idx=data.covariates_idx,
+                covariates_idx=_move_inputs(data.covariates_idx)[0],
                 return_latent_basal=True,
             )
-        
+    
 
 
     mean = latent_basal.mean(dim=0, keepdim=True)
@@ -223,16 +309,17 @@ def evaluate_disentanglement(autoencoder, data: chemCPA.data.Dataset):
             [normalized_basal.size(1)]
             + [normalized_basal.size(1) for _ in range(2)]
             + [len(unique_labels)]
-        ).to(autoencoder.device)
+        ).to(_device)
         optimizer = torch.optim.Adam(disentanglement_classifier.parameters(), lr=1e-2)
-
-        for epoch in range(400):
-            for X, y in data_loader:
-                pred = disentanglement_classifier(X)
-                loss = criterion(pred, y)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+        
+        with torch.set_grad_enabled(True):
+            for epoch in range(400):
+                for X, y in data_loader:
+                    pred = disentanglement_classifier(X)
+                    loss = criterion(pred, y)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
 
         with torch.no_grad():
             pred = disentanglement_classifier(normalized_basal).argmax(dim=1)
@@ -257,11 +344,11 @@ def evaluate_disentanglement(autoencoder, data: chemCPA.data.Dataset):
                 covariate_score.append(compute_score(data.covariate_names[cov]))
         total_scores.append(covariate_score)
     else: total_scores.append(None)
-    
+
     return total_scores
 
 
-def evaluate_r2(autoencoder: ComPert, dataset: SubDataset, genes_control: torch.Tensor):
+def evaluate_r2(autoencoder, dataset: SubDataset, genes_control: torch.Tensor, return_mean: bool = True):
     """
     Measures different quality metrics about an ComPert `autoencoder`, when
     tasked to translate some `genes_control` into each of the perturbation/covariates
@@ -271,9 +358,10 @@ def evaluate_r2(autoencoder: ComPert, dataset: SubDataset, genes_control: torch.
     well as R2 score about means and variances about differentially expressed
     (_de) genes.
     """
+    
     mean_score, var_score, mean_score_de, var_score_de = [], [], [], []
     n_rows = genes_control.size(0)
-    genes_control = genes_control.to(autoencoder.device)
+    genes_control = genes_control.to(_device)
 
     # dataset.pert_categories contains: 'celltype_perturbation_dose' info
     pert_categories_index = pd.Index(dataset.pert_categories, dtype="category")
@@ -360,15 +448,21 @@ def evaluate_r2(autoencoder: ComPert, dataset: SubDataset, genes_control: torch.
         var_score.append(max(r2_v, 0.0))
         mean_score_de.append(max(r2_m_de, 0.0))
         var_score_de.append(max(r2_v_de, 0.0))
-    if len(mean_score) > 0:
+
+    if return_mean:
+        if len(mean_score) > 0:
+            return [
+                np.mean(s) for s in [mean_score, mean_score_de, var_score, var_score_de]
+            ]
+        else:
+            return []
+    else: 
         return [
-            np.mean(s) for s in [mean_score, mean_score_de, var_score, var_score_de]
+            mean_score, mean_score_de, var_score, var_score_de
         ]
-    else:
-        return []
+        
 
-
-def evaluate_r2_sc(autoencoder: ComPert, dataset: SubDataset):
+def evaluate_r2_sc(autoencoder, dataset: SubDataset, return_mean: bool = True):
     """
     Measures quality metric about an ComPert `autoencoder`. Computing
     the reconstruction of a single datapoint in terms of the R2 score.
@@ -477,19 +571,20 @@ def evaluate_r2_sc(autoencoder: ComPert, dataset: SubDataset):
     print(
         f"{len(inf_combinations)} combinations had '-inf' R2 scores:\n\t {inf_combinations}"
     )
-    if len(mean_score) > 0:
-        return [
-            np.mean(s, dtype=float)
-            for s in [mean_score, mean_score_de, var_score, var_score_de]
-        ]
-    else:
-        return []
+    if return_mean:
+        if len(mean_score) > 0:
+            return [
+                np.mean(s, dtype=float)
+                for s in [mean_score, mean_score_de, var_score, var_score_de]
+            ]
+        else:
+            return []
+    else: return [mean_score, mean_score_de, var_score, var_score_de]
 
 
 def evaluate(
     autoencoder,
     datasets,
-    eval_stats,
     run_disentangle=False,
     run_r2=True,
     run_r2_sc=False,
@@ -502,7 +597,9 @@ def evaluate(
     eval_stats is the default evaluation dictionary that is updated with the missing scores
     """
     start_time = time.time()
-    autoencoder.eval()
+    logging.info('Start to run the evaluation of accuracy')
+    #autoencoder.eval() do not need to call this since lightning would do this
+    evaluation_stats = {}
     if run_disentangle:
         logging.info("Running disentanglement evaluation")
         disent_scores = evaluate_disentanglement(autoencoder, datasets["test"])
@@ -514,9 +611,8 @@ def evaluate(
             stats_disent_drug = disent_scores[0]
             # optimal score == always predicting the most common drug
             optimal_disent_score_drug = max(drug_counts) / len(datasets["test"])
-        else:
-            stats_disent_drug = None
-            optimal_disent_score_drug = None
+            evaluation_stats['stats_disent_drug'] = stats_disent_drug
+            evaluation_stats['optimal_disent_score_drug'] = optimal_disent_score_drug
         if datasets['test'].num_knockouts > 0:
             knockouts_names, knockouts_counts = np.unique(
                 datasets["test"].knockouts_names, return_counts=True
@@ -524,9 +620,8 @@ def evaluate(
             stats_disent_knockout = disent_scores[1]
             # optimal score == always predicting the most common drug
             optimal_disent_score_knockout = max(knockouts_counts) / len(datasets["test"])
-        else: 
-            stats_disent_knockout = None
-            optimal_disent_score_knockout = None
+            evaluation_stats['stats_disent_knockout'] = stats_disent_knockout
+            evaluation_stats['optimal_disent_score_knockout'] = optimal_disent_score_knockout
         if datasets['test'].num_covariates[0] > 0:
             stats_disent_cov = disent_scores[2]
             optimal_disent_cov = []
@@ -534,95 +629,86 @@ def evaluate(
                 most_common_element = torch.mode(cov)[0]
                 count_most_common = torch.sum(cov == most_common_element).item()
                 optimal_disent_cov.append(count_most_common / cov.size(0))
-        else: 
-            stats_disent_cov = None
-            optimal_disent_cov = None
-    else:
-        stats_disent_drug = None
-        optimal_disent_score_drug = None
-        stats_disent_knockout = None
-        optimal_disent_score_knockout = None
-        stats_disent_cov = None
-        optimal_disent_cov = None
+            for i in range(len(stats_disent_cov)):
+                evaluation_stats[f'stats_disent_cov_{i}'] = stats_disent_cov[i]
+                evaluation_stats[f'optimal_disent_cov_{i}'] = optimal_disent_cov[i]
 
-    with torch.no_grad():
-        evaluation_stats = {
-            "drug-perturbation disentanglement": stats_disent_drug,
-            "optimal for drug perturbations": optimal_disent_score_drug,
-            "knockout-perturbation disentanglement": stats_disent_knockout,
-            "optimal for knockout perturbations": optimal_disent_score_knockout,
-            "covariate disentanglement": stats_disent_cov,
-            "optimal for covariates": optimal_disent_cov
-        }
+    if run_r2:
+        logging.info("Running R2 evaluation")
+        training_r2 = evaluate_r2(
+            autoencoder,
+            datasets["training_treated"],
+            datasets["training_control"].genes,
+        )
+        if training_r2 != []:
+            evaluation_stats['training_mean_score'] = training_r2[0]
+            evaluation_stats['training_mean_score_de'] = training_r2[1]
+            evaluation_stats['training_var_score'] = training_r2[2]
+            evaluation_stats['training_var_score_de'] = training_r2[3]
+        test_r2 = evaluate_r2(
+            autoencoder,
+            datasets["test_treated"],
+            datasets["test_control"].genes,
+        )
+        if test_r2 != []:
+            evaluation_stats['test_mean_score'] = test_r2[0]
+            evaluation_stats['test_mean_score_de'] = test_r2[1]
+            evaluation_stats['test_var_score'] = test_r2[2]
+            evaluation_stats['test_var_score_de'] = test_r2[3]
+        ood_r2 = evaluate_r2(
+            autoencoder,
+            datasets["ood"],
+            datasets["test_control"].genes,
+        )
+        if ood_r2 != []:
+            evaluation_stats['ood_mean_score'] = ood_r2[0]
+            evaluation_stats['ood_mean_score_de'] = ood_r2[1]
+            evaluation_stats['ood_var_score'] = ood_r2[2]
+            evaluation_stats['ood_var_score_de'] = ood_r2[3]
+    if run_r2_sc:
+        logging.info("Running single-cell R2 evaluation")
+        training_sc = evaluate_r2_sc(
+            autoencoder, datasets["training_treated"]
+        )
+        if training_sc != []:
+            evaluation_stats['training_sc_mean_score'] = training_sc[0]
+            evaluation_stats['training_sc_mean_score_de'] = training_sc[1]
+            evaluation_stats['training_sc_var_score'] = training_sc[2]
+            evaluation_stats['training_sc_var_score_de'] = training_sc[3]
+        test_sc = evaluate_r2_sc(
+                autoencoder, datasets["test_treated"]
+            )
+        if test_sc != []:
+            evaluation_stats['test_sc_mean_score'] = test_sc[0]
+            evaluation_stats['test_sc_mean_score_de'] = test_sc[1]
+            evaluation_stats['test_sc_var_score'] = test_sc[2]
+            evaluation_stats['test_sc_var_score_de'] = test_sc[3]
+        ood_sc = evaluate_r2_sc(autoencoder, datasets["ood"])
+        if ood_sc != []:
+            evaluation_stats['ood_sc_mean_score'] = ood_sc[0]
+            evaluation_stats['ood_sc_mean_score_de'] = ood_sc[1]
+            evaluation_stats['ood_sc_var_score'] = ood_sc[2]
+            evaluation_stats['ood_sc_var_score_de'] = ood_sc[3]
+    if run_logfold:
+        logging.info("Running logfold evaluation")
+        evaluation_stats['training_logfold_score'], evaluation_stats['training_logfold_signs_score'] = evaluate_logfold_r2(
+            autoencoder,
+            datasets["training_treated"],
+            datasets["training_control"],
+        )
+        evaluation_stats['test_logfold_score'], evaluation_stats['test_logfold_signs_score'] = evaluate_logfold_r2(
+            autoencoder,
+            datasets["test_treated"],
+            datasets["test_control"],
+        )
+        evaluation_stats['ood_logfold_score'], evaluation_stats['ood_logfold_signs_score'] = evaluate_logfold_r2(
+            autoencoder,
+            datasets["ood"],
+            datasets["test_control"],
+        )
 
-        if run_r2:
-            logging.info("Running R2 evaluation")
-            evaluation_stats["training"] = evaluate_r2(
-                autoencoder,
-                datasets["training_treated"],
-                datasets["training_control"].genes,
-            )
-            if "test" in eval_stats:
-                evaluation_stats["test"] = eval_stats["test"]
-            else:
-                evaluation_stats["test"] = evaluate_r2(
-                    autoencoder,
-                    datasets["test_treated"],
-                    datasets["test_control"].genes,
-                )
-            evaluation_stats["ood"] = evaluate_r2(
-                autoencoder,
-                datasets["ood"],
-                datasets["test_control"].genes,
-            )
-
-        if run_r2_sc:
-            logging.info("Running single-cell R2 evaluation")
-            evaluation_stats["training_sc"] = evaluate_r2_sc(
-                autoencoder, datasets["training_treated"]
-            )
-            if "test_sc" in eval_stats:
-                evaluation_stats["test_sc"] = eval_stats["test_sc"]
-            else:
-                evaluation_stats["test_sc"] = evaluate_r2_sc(
-                    autoencoder, datasets["test_treated"]
-                )
-            evaluation_stats["ood_sc"] = (evaluate_r2_sc(autoencoder, datasets["ood"]),)
-
-        if run_logfold:
-            logging.info("Running logfold evaluation")
-            evaluation_stats["training_logfold"] = evaluate_logfold_r2(
-                autoencoder,
-                datasets["training_treated"],
-                datasets["training_control"],
-            )
-            evaluation_stats["test_logfold"] = evaluate_logfold_r2(
-                autoencoder,
-                datasets["test_treated"],
-                datasets["test_control"],
-            )
-            evaluation_stats["ood_logfold"] = evaluate_logfold_r2(
-                autoencoder,
-                datasets["ood"],
-                datasets["test_control"],
-            )
-
-    autoencoder.train()
     ellapsed_minutes = (time.time() - start_time) / 60
-    print(f"\nTook {ellapsed_minutes:.1f} min for evaluation.\n")
+    logging.info(f"\nTook {ellapsed_minutes:.1f} min for evaluation of accuracy.\n")
     return evaluation_stats
 
 
-"""
-def custom_collate(batch):
-    genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, cov = zip(*batch)
-    genes = torch.stack(genes, 0).to(device)
-    drugs_idx = None if drugs_idx[0] is None else [d.to(device) for d in drugs_idx]
-    dosages = None if dosages[0] is None else [d.to(device) for d in dosages]
-    drugs_emb = None if drugs_emb[0] is None else [d.to(device) for d in drugs_emb]
-    knockouts_idx = None if knockouts_idx[0] is None else [d.to(device) for d in knockouts_idx]
-    knockouts_emb = None if knockouts_emb[0] is None else [d.to(device) for d in knockouts_emb]
-    cov = None if cov[0] is None else  torch.stack(cov, 0).to(device)
-    return [genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, cov]
-
-"""
