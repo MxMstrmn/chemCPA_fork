@@ -291,8 +291,8 @@ class ComPert(L.LightningModule):
         num_knockouts: int,
         num_covariates: list,
         hparams,
-        training_hparams,
-        test_hparams,
+        training_params,
+        test_params,
         seed=0,
         doser_type="logsigm",
         knockout_effect_type="original",
@@ -899,7 +899,9 @@ class ComPert(L.LightningModule):
                                 reconstruction_loss
                                 - self.hparams.hparams['reg_adversary_drug'] * adversary_drugs_loss
                                 - self.hparams.hparams['reg_adversary_knockout'] * adversary_knockouts_loss
-                                - self.hparams.hparams['reg_adversary_cov'] * adversary_covariates_loss
+                                - self.hparams.hparams['reg_adversary_cov'] * adversary_covariates_loss * (self.num_covariates != [1])
+                                #turn off the covariate loss if only 1 cell line
+                                #the implementation may be different when there are multiple covariates
             )
             optimizer_autoencoder.step()
             if (self.num_drugs > 0) and (self.doser_type != "original"):
@@ -931,7 +933,7 @@ class ComPert(L.LightningModule):
         
 
     def validation_step(self, batch, batch_idx):
-        if not self.hparams.training_hparams['full_eval_during_train']:
+        if not self.hparams.training_params['full_eval_during_train']:
             logging.info(f"Running accuracy evaluation (Epoch:{self.current_epoch})")
             dataset_test_treated, dataset_test_control_genes = batch
             evaluation_r2_scores = evaluate_r2(
@@ -961,13 +963,13 @@ class ComPert(L.LightningModule):
             evaluation_stats = evaluate(
                                         self,
                                         datasets,
-                                        run_disentangle=self.hparams.training_hparams['run_eval_disentangle'],
-                                        run_r2=self.hparams.training_hparams['run_eval_r2'],
-                                        run_r2_sc=self.hparams.training_hparams['run_eval_r2_sc'],
-                                        run_logfold=self.hparams.training_hparams['run_eval_logfold'],
+                                        run_disentangle=self.hparams.training_params['run_eval_disentangle'],
+                                        run_r2=self.hparams.training_params['run_eval_r2'],
+                                        run_r2_sc=self.hparams.training_params['run_eval_r2_sc'],
+                                        run_logfold=self.hparams.training_params['run_eval_logfold'],
                         )
             self.log_dict(evaluation_stats, batch_size=1)
-            if self.hparams.test_hparams['run_eval_r2']:
+            if self.hparams.test_params['run_eval_r2']:
                 self.log('average_r2_score', 
                         np.mean([evaluation_stats['test_mean_score'],
                         evaluation_stats['test_mean_score_de'],
@@ -1007,13 +1009,13 @@ class ComPert(L.LightningModule):
         evaluation_stats = evaluate(
                                     self,
                                     datasets,
-                                    run_disentangle=self.hparams.test_hparams['run_eval_disentangle'],
-                                    run_r2=self.hparams.test_hparams['run_eval_r2'],
-                                    run_r2_sc=self.hparams.test_hparams['run_eval_r2_sc'],
-                                    run_logfold=self.hparams.test_hparams['run_eval_logfold'],
+                                    run_disentangle=self.hparams.test_params['run_eval_disentangle'],
+                                    run_r2=self.hparams.test_params['run_eval_r2'],
+                                    run_r2_sc=self.hparams.test_params['run_eval_r2_sc'],
+                                    run_logfold=self.hparams.test_params['run_eval_logfold'],
                     )
         self.log_dict(evaluation_stats, batch_size=1)
-        if self.hparams.test_hparams['run_eval_r2']:
+        if self.hparams.test_params['run_eval_r2']:
             self.log('average_r2_score', 
                     np.mean([evaluation_stats['test_mean_score'],
                                                     evaluation_stats['test_mean_score_de'],
