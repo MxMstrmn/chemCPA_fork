@@ -11,6 +11,7 @@ from anndata import AnnData
 from rdkit import Chem
 import lightning as L
 from torch.utils.data import DataLoader
+import omegaconf
 
 if torch.cuda.is_available():
     _device = "cuda"
@@ -106,6 +107,8 @@ class Dataset:
         self.dose_key = dose_key
         if isinstance(covariate_keys, str):
             covariate_keys = [covariate_keys]
+        if isinstance(covariate_keys, omegaconf.listconfig.ListConfig):
+            covariate_keys = list(covariate_keys)
         self.covariate_keys = covariate_keys
         self.smiles_key = smiles_key
         if degs_key is not None:
@@ -225,7 +228,8 @@ class Dataset:
             self.knockouts_embeddings = None
             self.knockout_embedding_dimension = None
 
-        if isinstance(covariate_keys, list) and covariate_keys:
+        
+        if isinstance(covariate_keys, list) and len(covariate_keys)>0:
             if not len(covariate_keys) == len(set(covariate_keys)):
                 raise ValueError(f"Duplicate keys were given in: {covariate_keys}")
             self.covariate_names = {}
@@ -327,6 +331,7 @@ class SubDataset:
         self.knockouts_names = indx(dataset.knockouts_names, indices)
         self.pert_categories = indx(dataset.pert_categories, indices)
         self.covariate_names = {}
+    
         for cov in self.covariate_keys:
             self.covariate_names[cov] = indx(dataset.covariate_names[cov], indices)
 
@@ -361,7 +366,7 @@ def load_dataset_splits(
     drug_key: Union[str, None],
     dose_key: Union[str, None],
     knockout_key: Union[str, None],
-    covariate_keys: Union[list, str, None],
+    covariate_keys: Union[list, str, None, omegaconf.listconfig.ListConfig],
     smiles_key: Union[str, None],
     pert_category: str = "cov_geneid",
     split_key: str = "split",
@@ -431,7 +436,7 @@ class DataModule(L.LightningDataModule):
                 drug_key: Union[str, None],
                 dose_key: Union[str, None],
                 knockout_key: Union[str, None],
-                covariate_keys: Union[list, str, None],
+                covariate_keys: Union[list, str, None, omegaconf.listconfig.ListConfig],
                 smiles_key: Union[str, None],
                 pert_category: str = "cov_geneid",
                 split_key: str = "split",
