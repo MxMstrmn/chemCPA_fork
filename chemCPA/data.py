@@ -406,15 +406,16 @@ def load_dataset_splits(
 
 
 def custom_collate_train(batch):
-    genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, cov = zip(*batch)
+    genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, *covs = zip(*batch)
     genes = torch.stack(genes, 0)
     drugs_idx = None if drugs_idx[0] is None else [d for d in drugs_idx]
     dosages = None if dosages[0] is None else [d for d in dosages]
     drugs_emb = None if drugs_emb[0] is None else [d for d in drugs_emb]
     knockouts_idx = None if knockouts_idx[0] is None else [d for d in knockouts_idx]
     knockouts_emb = None if knockouts_emb[0] is None else [d for d in knockouts_emb]
-    cov = None if cov[0] is None else  torch.stack(cov, 0)
-    return [genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, cov]
+    for i in range(len(covs)):
+        covs[i] = None if (covs[i][0] is None) else  torch.stack(covs[i], 0)
+    return [genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, *covs]
 
 
 def custom_collate_validate_r2(batch):
@@ -497,6 +498,7 @@ class DataModule(L.LightningDataModule):
                             collate_fn = custom_collate_validate_r2,
                             shuffle=False
                             )
+    
     def test_dataloader(self):
         return DataLoader(
                         [self.datasets],
@@ -504,3 +506,4 @@ class DataModule(L.LightningDataModule):
                         collate_fn = custom_collate_full_evaluation,
                         shuffle=False
                         )
+    
