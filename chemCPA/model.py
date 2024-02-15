@@ -159,7 +159,7 @@ class CELoss(torch.nn.Module):
         preds = softmax(preds)
 
         batch_size = len(targets)
-        preds = [preds[j,:][targets[j]] for j in range(batch_size)]
+        preds = [preds[j,:][targets[j].long()] for j in range(batch_size)]
         loss = torch.tensor([-torch.log(pred).sum() for pred in preds])
         return (loss.sum() / batch_size)
 
