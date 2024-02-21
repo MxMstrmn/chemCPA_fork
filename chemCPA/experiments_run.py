@@ -9,21 +9,22 @@ wandb.login()
 
 from chemCPA.data import DataModule
 from chemCPA.model import ComPert
-import torch
-import numpy as np
+
 
 import lightning as L
 from lightning.pytorch import seed_everything
 from pytorch_lightning.loggers import WandbLogger
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
+from lightning.pytorch.callbacks import ModelCheckpoint
 
-@hydra.main(version_base=None, config_path='../chemCPA/config', config_name='config')
+
+@hydra.main(version_base=None, config_path='../experiments/hydra_config', config_name='config')
 def main(cfg: DictConfig):
     dm = DataModule(cfg.model.hparams.batch_size,
                     cfg.train.full_eval_during_train,
                     **cfg.dataset.data_params
                     )
-
+    
     model = ComPert(
         dm.datasets['training'].num_genes,
         dm.datasets['training'].num_drugs,
@@ -36,13 +37,22 @@ def main(cfg: DictConfig):
         drug_embedding_dimension=dm.datasets['training'].drug_embedding_dimension,
         knockout_embedding_dimension=dm.datasets['training'].knockout_embedding_dimension
         )
-
-    early_stop_callback = EarlyStopping('average_r2_score', 
-                                    patience=cfg.train.patience, 
-                                    mode='max')
-
+    #can also load model from checkpoint
+    #model = ComPert.load_from_checkpoint(path)
+    
+    early_stop_callback = EarlyStopping(
+        'average_r2_score', 
+        patience=cfg.train.patience, 
+        mode='max'
+    )
+    checkpoint_callback = ModelCheckpoint(
+        save_top_k = 1,
+        mode = 'max',
+        monitor = 'average_r2_score',
+        save_last = True
+    )
     wandb_logger = WandbLogger(
-        project = cfg.model.model_type + "_" + cfg.dataset.dataset_type,
+        project = cfg.model.model_type + "_" + cfg.dataset.dataset_type ,
         save_dir = cfg.model.save_dir      
     )
 
@@ -54,13 +64,13 @@ def main(cfg: DictConfig):
         check_val_every_n_epoch= cfg.train.checkpoint_freq,
         default_root_dir=cfg.model.save_dir,
         profiler="advanced",
-        callbacks=[early_stop_callback],
+        callbacks=[early_stop_callback, checkpoint_callback],
         inference_mode=inference_mode
     )
     
     trainer.fit(model, datamodule=dm)
-    trainer.test(model, datamodule=dm)
-    
+    trainer.test(model, datamodule=dm, ckpt_path='best')
+    #trainer.test(model, datamodule=dm, ckpt_path='last') can also test on the final model
     
 if __name__ == "__main__":
     main()
