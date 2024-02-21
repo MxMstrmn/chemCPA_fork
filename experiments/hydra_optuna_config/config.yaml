@@ -1,0 +1,71 @@
+defaults:
+  - dataset: norman
+  - model: cpa
+  - test: test
+  - train: train
+  - override hydra/job_logging: colorlog
+  - override hydra/hydra_logging: colorlog
+  - override hydra/sweeper: optuna
+  - override hydra/sweeper/sampler: tpe
+
+hydra:
+  sweeper:
+    direction: maximize
+    study_name: hparams_sweep
+    storage: null
+    n_trials: 20
+    params:
+      dim: choice(32, 64, 128, 256, 512)
+      dosers_width: choice(64, 128, 256)
+      dosers_depth: choice(2,3,4)
+      dosers_lr: tag(log, interval(0.0001, 0.01))
+      dosers_wd: tag(log, interval(0.00000001, 0.00001))
+      knockout_effects_width: choice(64, 128, 256)
+      knockout_effects_depth: choice(2,3,4)
+      knockout_effects_lr: tag(log, interval(0.0001, 0.01))
+      knockout_effects_wd: tag(log, interval(0.00000001, 0.00001))
+      autoencoder_width: choice(128, 256, 512)
+      autoencoder_depth: choice(3,4,5)
+      adversary_width: choice(64, 128, 256)
+      adversary_depth: choice(2,3,4)
+      reg_adversary_drug: tag(log, interval(5, 30))
+      reg_adversary_knockout: tag(log, interval(5, 30))
+      reg_adversary_cov: tag(log, interval(5, 30))
+      penalty_adversary: tag(log, interval(1, 10))
+      autoencoder_lr: tag(log, interval(0.0001, 0.01))
+      adversary_lr: tag(log, interval(0.00005, 0.01))
+      autoencoder_wd: tag(log, interval(0.00000001, 0.00001))
+      adversary_wd: tag(log, interval(0.00000001, 0.001))
+      adversary_steps: choice(2,3)
+      batch_size: choice(64, 128, 256, 512)
+      step_size_lr: choice(200, 50, 100)
+      embedding_encoder_width: choice(128, 256, 512)
+      embedding_encoder_depth: choice(2,3,4)
+      
+
+dim: 256
+dosers_width: 64
+dosers_depth: 2
+dosers_lr: 0.001
+dosers_wd: 0.0000001
+knockout_effects_width: 64
+knockout_effects_depth: 2
+knockout_effects_lr: 0.001
+knockout_effects_wd: 0.0000001
+autoencoder_width: 512
+autoencoder_depth: 4
+adversary_width: 128
+adversary_depth: 3
+reg_adversary_drug: 5
+reg_adversary_knockout: 5
+reg_adversary_cov: 5
+penalty_adversary: 3
+autoencoder_lr: 0.001
+adversary_lr: 0.0003
+autoencoder_wd: 0.000001
+adversary_wd: 0.0001
+adversary_steps: 3
+batch_size: 128
+step_size_lr: 100
+embedding_encoder_width: 256
+embedding_encoder_depth: 2
