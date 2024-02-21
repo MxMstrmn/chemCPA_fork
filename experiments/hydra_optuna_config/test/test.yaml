@@ -1,0 +1,4 @@
+run_eval_disentangle: false # whether to calc the disentanglement loss when running the full eval
+run_eval_r2: true
+run_eval_r2_sc: false
+run_eval_logfold: false
