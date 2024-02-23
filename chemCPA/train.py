@@ -11,6 +11,12 @@ import chemCPA.data
 from chemCPA.data import SubDataset
 from chemCPA.model import MLP, ComPert
 
+if torch.cuda.is_available():
+    _device = "cuda"
+elif torch.backends.mps.is_available():
+    _device = "mps"
+else:
+    _device = "cpu"
 
 def bool2idx(x):
     """
@@ -36,23 +42,24 @@ def mean(x: list):
     return np.mean(x) if len(x) else -1
 
 
-def compute_prediction(autoencoder: ComPert, genes, emb_drugs, emb_covs):
+def compute_prediction(autoencoder: ComPert, genes, drugs=None, knockouts=None, covs=None):
     """
     Computes the prediction of a ComPert `autoencoder` and
     directly splits into `mean` and `variance` predictions
     """
-    if autoencoder.use_drugs_idx:
-        assert len(emb_drugs) == 2
-        genes_pred = autoencoder.predict(
-            genes=genes,
-            drugs_idx=emb_drugs[0],
-            dosages=emb_drugs[1],
-            covariates=emb_covs,
-        )[0].detach()
-    else:
-        genes_pred = autoencoder.predict(
-            genes=genes, drugs=emb_drugs, covariates=emb_covs
-        )[0].detach()
+
+    genes_pred = autoencoder.predict(
+        genes=genes,
+        drugs_idx=drugs[0] if (drugs is not None) else None,
+        dosages=drugs[1] if (drugs is not None) else None,
+        drugs_embeddings=drugs[2] if (drugs is not None) else None,
+        knockouts_idx=knockouts[0] if (knockouts is not None) else None,
+        knockouts_embeddings=knockouts[1] if (knockouts is not None) else None,
+        covariates_idx=covs if (covs is not None) else None,
+        return_latent_basal=False
+    ).detach()
+    #delete [0], don't know why it is here
+
     dim = genes.size(1)
     mean = genes_pred[:, :dim]
     var = genes_pred[:, dim:]
@@ -79,7 +86,7 @@ def evaluate_logfold_r2(
     cov_type = ds_treated.covariate_keys[0]
     treated_pert_cat_index = pd.Index(ds_treated.pert_categories, dtype="category")
     ctrl_cov_cat_index = pd.Index(ds_ctrl.covariate_names[cov_type], dtype="category")
-    for cell_drug_dose_comb, category_count in zip(
+    for cell_pert_comb, category_count in zip(
         *np.unique(ds_treated.pert_categories, return_counts=True)
     ):
         # estimate metrics only for reasonably-sized drug/cell-type combos
@@ -88,16 +95,17 @@ def evaluate_logfold_r2(
 
         # doesn't make sense to evaluate DMSO (=control) as a perturbation
         if (
-            "dmso" in cell_drug_dose_comb.lower()
-            or "control" in cell_drug_dose_comb.lower()
+            "dmso" in cell_pert_comb.lower()
+            or "control" in cell_pert_comb.lower()
+            or "ctrl" in cell_pert_comb.lower()
         ):
             continue
 
-        covariate = cell_drug_dose_comb.split("_")[0]
+        covariate = cell_pert_comb.split("_")[0]
 
-        bool_pert_categoy = treated_pert_cat_index.get_loc(cell_drug_dose_comb)
+        bool_pert_categoy = treated_pert_cat_index.get_loc(cell_pert_comb)
         idx_treated_all = bool2idx(bool_pert_categoy)
-        idx_treated = idx_treated_all[0]
+        idx_treated = idx_treated_all[0] ##why choose the first index??
 
         # this doesn't work on LINCS. Often `covariate` will not exist at all in the `ds_ctrl` (example: ASC.C)
         # this means we get `n_idx_ctrl == 0`, which results in all kinds of NaNs later on.
@@ -106,45 +114,53 @@ def evaluate_logfold_r2(
         idx_ctrl_all = bool2idx(bool_ctrl_all)
         n_idx_ctrl = len(idx_ctrl_all)
 
+        ##only consider the degs of a certain cell_pert_comb
         bool_de = ds_treated.var_names.isin(
-            np.array(ds_treated.de_genes[cell_drug_dose_comb])
+            np.array(ds_treated.de_genes[cell_pert_comb])
         )
         idx_de = bool2idx(bool_de)
 
         if n_idx_ctrl == 1:
             print(
-                f"For covariate {covariate} we have only one control in current set of observations. Skipping {cell_drug_dose_comb}."
+                f"For covariate {covariate} we have only one control in current set of observations. Skipping {cell_pert_comb}."
             )
             continue
 
-        emb_covs = [
-            repeat_n(cov[idx_treated], n_idx_ctrl) for cov in ds_treated.covariates
-        ]
-        if ds_treated.use_drugs_idx:
-            emb_drugs = (
-                repeat_n(ds_treated.drugs_idx[idx_treated], n_idx_ctrl).squeeze(),
-                repeat_n(ds_treated.dosages[idx_treated], n_idx_ctrl).squeeze(),
+        if ds_treated.covariates_idx is not None:
+            covs = [cov_idx[idx_treated].repeat(n_idx_ctrl) for cov_idx in ds_treated.covariates_idx]
+        else: covs = None
+        if ds_treated.drugs_idx is not None:
+            drugs = (
+                [ds_treated.drugs_idx[idx_treated]] * n_idx_ctrl,
+                [ds_treated.dosages[idx_treated]] * n_idx_ctrl,
+                [ds_treated.drugs_embeddings(ds_treated.drugs_idx[idx_treated])] * n_idx_ctrl
             )
-        else:
-            emb_drugs = repeat_n(ds_treated.drugs[idx_treated], n_idx_ctrl)
+        else: drugs = None
+        if ds_treated.knockouts_idx is not None:
+            knockouts = (
+                [ds_treated.knockouts_idx[idx_treated]] * n_idx_ctrl,
+                [ds_treated.knockouts_embeddings(ds_treated.knockouts_idx[idx_treated])] * n_idx_ctrl
+            )
+        else: knockouts = None
 
         # Could try moving the whole genes tensor to GPU once for further speedups (but more memory problems)
-        genes_ctrl = ds_ctrl.genes[idx_ctrl_all].to(device="cuda")
-
+        genes_ctrl = ds_ctrl.genes[idx_ctrl_all].to(device=_device)
         genes_pred, _ = compute_prediction(
             autoencoder,
             genes_ctrl,
-            emb_drugs,
-            emb_covs,
+            drugs,
+            knockouts,
+            covs,
         )
         # Could try moving the whole genes tensor to GPU once for further speedups (but more memory problems)
-        genes_true = ds_treated.genes[idx_treated_all, :].to(device="cuda")
+        genes_true = ds_treated.genes[idx_treated_all, :].to(device=_device)
 
         y_ctrl = genes_ctrl.mean(0)[idx_de]
         y_pred = genes_pred.mean(0)[idx_de]
         y_true = genes_true.mean(0)[idx_de]
 
         eps = 1e-5
+        #what if y_pred is negative??
         pred = torch.log2((y_pred + eps) / (y_ctrl + eps))
         true = torch.log2((y_true + eps) / (y_ctrl + eps))
         r2 = compute_r2(true, pred)
@@ -158,8 +174,12 @@ def evaluate_logfold_r2(
 def evaluate_disentanglement(autoencoder, data: chemCPA.data.Dataset):
     """
     Given a ComPert model, this function measures the correlation between
-    its latent space and 1) a dataset's drug vectors 2) a datasets covariate
+    its latent space and 1) a dataset's drug vectors (if any) 2) a dataset's
+    knockouts vector (if any) 3) a datasets covariate
     vectors.
+
+    Return: [drug_score, knockout_score, [covariate_scores]] if the attributes exist; otherwise,
+    would be None
 
     """
 
@@ -167,34 +187,30 @@ def evaluate_disentanglement(autoencoder, data: chemCPA.data.Dataset):
     print(f"Size of disentanglement testdata: {len(data)}")
 
     with torch.no_grad():
-        if data.use_drugs_idx:
-            _, _, latent_basal = autoencoder.predict(
+            _, latent_basal = autoencoder.predict(
                 genes=data.genes,
                 drugs_idx=data.drugs_idx,
                 dosages=data.dosages,
-                covariates=data.covariates,
+                drugs_embeddings = [data.drugs_embeddings(i) for i in data.drugs_idx] if
+                data.drugs_idx is not None else None,
+                knockouts_idx = data.knockouts_idx,
+                knockouts_embeddings = [data.knockouts_embeddings(i) for i in data.knockouts_idx] if
+                data.knockouts_idx is not None else None,
+                covariates_idx=data.covariates_idx,
                 return_latent_basal=True,
             )
-        else:
-            _, _, latent_basal = autoencoder.predict(
-                genes=data.genes,
-                drugs=data.drugs,
-                covariates=data.covariates,
-                return_latent_basal=True,
-            )
+
 
     mean = latent_basal.mean(dim=0, keepdim=True)
     stddev = latent_basal.std(0, unbiased=False, keepdim=True)
     normalized_basal = (latent_basal - mean) / stddev
-
     criterion = nn.CrossEntropyLoss()
-    pert_score, cov_scores = 0, []
 
     def compute_score(labels):
         unique_labels = set(labels)
         label_to_idx = {labels: idx for idx, labels in enumerate(unique_labels)}
         labels_tensor = torch.tensor(
-            [label_to_idx[label] for label in labels], dtype=torch.long, device="cuda"
+            [label_to_idx[label] for label in labels], dtype=torch.long, device=_device
         )
         assert normalized_basal.size(0) == len(labels_tensor)
         dataset = torch.utils.data.TensorDataset(normalized_basal, labels_tensor)
@@ -222,22 +238,32 @@ def evaluate_disentanglement(autoencoder, data: chemCPA.data.Dataset):
             acc = torch.sum(pred == labels_tensor) / len(labels_tensor)
         return acc.item()
 
-    if data.perturbation_key is not None:
-        pert_score = compute_score(data.drugs_names)
-    for cov in list(data.covariate_names):
-        cov_scores = []
-        if len(np.unique(data.covariate_names[cov])) == 0:
-            cov_scores = [0]
-            break
-        else:
-            cov_scores.append(compute_score(data.covariate_names[cov]))
-        return [pert_score] + cov_scores
+    total_scores = []
+    if data.drug_key is not None:
+        drug_score = compute_score(data.drugs_names)
+        total_scores.append(drug_score)
+    else: total_scores.append(None)
+    if data.knockout_key is not None:
+        knockout_score = compute_score(data.knockouts_names)
+        total_scores.append(knockout_score)
+    else: total_scores.append(None)
+    if data.covariate_keys is not None:
+        covariate_score = []
+        for cov in data.covariate_names.keys():
+            if len(np.unique(data.covariate_names[cov])) == 0:
+                continue
+            else:
+                covariate_score.append(compute_score(data.covariate_names[cov]))
+        total_scores.append(covariate_score)
+    else: total_scores.append(None)
+
+    return total_scores
 
 
 def evaluate_r2(autoencoder: ComPert, dataset: SubDataset, genes_control: torch.Tensor):
     """
     Measures different quality metrics about an ComPert `autoencoder`, when
-    tasked to translate some `genes_control` into each of the drug/covariates
+    tasked to translate some `genes_control` into each of the perturbation/covariates
     combinations described in `dataset`.
 
     Considered metrics are R2 score about means and variances for all genes, as
@@ -250,20 +276,21 @@ def evaluate_r2(autoencoder: ComPert, dataset: SubDataset, genes_control: torch.
 
     # dataset.pert_categories contains: 'celltype_perturbation_dose' info
     pert_categories_index = pd.Index(dataset.pert_categories, dtype="category")
-    for cell_drug_dose_comb, category_count in zip(
+    for cell_pert_comb, category_count in zip(
         *np.unique(dataset.pert_categories, return_counts=True)
     ):
-        if dataset.perturbation_key is None:
+        if (dataset.drug_key is None) and (dataset.knockout_key is None):
             break
 
         # estimate metrics only for reasonably-sized drug/cell-type combos
         if category_count <= 5:
             continue
 
-        # doesn't make sense to evaluate DMSO (=control) as a perturbation
+        # doesn't make sense to evaluate control as a perturbation
         if (
-            "dmso" in cell_drug_dose_comb.lower()
-            or "control" in cell_drug_dose_comb.lower()
+            "dmso" in cell_pert_comb.lower()
+            or "control" in cell_pert_comb.lower()
+            or "ctrl" in cell_pert_comb.lower()
         ):
             continue
 
@@ -271,7 +298,7 @@ def evaluate_r2(autoencoder: ComPert, dataset: SubDataset, genes_control: torch.
         # dataset.de_genes is a dict, containing a list of all differentiably-expressed
         # genes for every cell_drug_dose combination.
         bool_de = dataset.var_names.isin(
-            np.array(dataset.de_genes[cell_drug_dose_comb])
+            np.array(dataset.de_genes[cell_pert_comb])
         )
         idx_de = bool2idx(bool_de)
 
@@ -279,28 +306,38 @@ def evaluate_r2(autoencoder: ComPert, dataset: SubDataset, genes_control: torch.
         if len(idx_de) < 2:
             continue
 
-        bool_category = pert_categories_index.get_loc(cell_drug_dose_comb)
+        bool_category = pert_categories_index.get_loc(cell_pert_comb)
         idx_all = bool2idx(bool_category)
         idx = idx_all[0]
 
-        emb_covs = [repeat_n(cov[idx], n_rows) for cov in dataset.covariates]
-        if dataset.use_drugs_idx:
-            emb_drugs = (
-                repeat_n(dataset.drugs_idx[idx], n_rows).squeeze(),
-                repeat_n(dataset.dosages[idx], n_rows).squeeze(),
+        if dataset.covariates_idx is not None:
+            covs = [cov_idx[idx].repeat(n_rows) for cov_idx in dataset.covariates_idx]
+        else: covs = None
+        if dataset.drugs_idx is not None:
+            drugs = (
+                [dataset.drugs_idx[idx]] * n_rows,
+                [dataset.dosages[idx]] * n_rows,
+                [dataset.drugs_embeddings(dataset.drugs_idx[idx])] * n_rows
             )
-        else:
-            emb_drugs = repeat_n(dataset.drugs[idx], n_rows)
+        else: drugs = None
+        if dataset.knockouts_idx is not None:
+            knockouts = (
+                [dataset.knockouts_idx[idx]] * n_rows,
+                [dataset.knockouts_embeddings(dataset.knockouts_idx[idx])] * n_rows
+            )
+        else: knockouts = None
+
         mean_pred, var_pred = compute_prediction(
             autoencoder,
             genes_control,
-            emb_drugs,
-            emb_covs,
+            drugs,
+            knockouts,
+            covs
         )
 
         # copies just the needed genes to GPU
         # Could try moving the whole genes tensor to GPU once for further speedups (but more memory problems)
-        y_true = dataset.genes[idx_all, :].to(device="cuda")
+        y_true = dataset.genes[idx_all, :].to(device=_device)
 
         # true means and variances
         yt_m = y_true.mean(dim=0)
@@ -341,23 +378,24 @@ def evaluate_r2_sc(autoencoder: ComPert, dataset: SubDataset):
     """
     mean_score, var_score, mean_score_de, var_score_de = [], [], [], []
 
-    # dataset.pert_categories contains: 'celltype_perturbation_dose' info
+    # dataset.pert_categories contains: 'celltype_perturbation' info
     pert_categories_index = pd.Index(dataset.pert_categories, dtype="category")
     inf_combinations = set()
-    for cell_drug_dose_comb, category_count in zip(
+    for cell_pert_comb, category_count in zip(
         *np.unique(dataset.pert_categories, return_counts=True)
     ):
-        if dataset.perturbation_key is None:
+        if (dataset.drug_key is None) and (dataset.knockout_key is None):
             break
 
         # estimate metrics only for reasonably-sized drug/cell-type combos
         if category_count <= 5:
             continue
 
-        # doesn't make sense to evaluate DMSO (=control) as a perturbation
+        # doesn't make sense to evaluate control as a perturbation
         if (
-            "dmso" in cell_drug_dose_comb.lower()
-            or "control" in cell_drug_dose_comb.lower()
+            "dmso" in cell_pert_comb.lower()
+            or "control" in cell_pert_comb.lower()
+            or "ctrl" in cell_pert_comb.lower()
         ):
             continue
 
@@ -365,7 +403,7 @@ def evaluate_r2_sc(autoencoder: ComPert, dataset: SubDataset):
         # dataset.de_genes is a dict, containing a list of all differentiably-expressed
         # genes for every cell_drug_dose combination.
         bool_de = dataset.var_names.isin(
-            np.array(dataset.de_genes[cell_drug_dose_comb])
+            np.array(dataset.de_genes[cell_pert_comb])
         )
         idx_de = bool2idx(bool_de)
 
@@ -373,20 +411,28 @@ def evaluate_r2_sc(autoencoder: ComPert, dataset: SubDataset):
         if len(idx_de) < 2:
             continue
 
-        bool_category = pert_categories_index.get_loc(cell_drug_dose_comb)
+        bool_category = pert_categories_index.get_loc(cell_pert_comb)
         idx_all = bool2idx(bool_category)
         idx = idx_all[0]
-        y_true = dataset.genes[idx_all, :].to(device="cuda")
+        y_true = dataset.genes[idx_all, :].to(device=_device)
         n_obs = y_true.size(0)
 
-        emb_covs = [repeat_n(cov[idx], n_obs) for cov in dataset.covariates]
-        if dataset.use_drugs_idx:
-            emb_drugs = (
-                repeat_n(dataset.drugs_idx[idx], n_obs).squeeze(),
-                repeat_n(dataset.dosages[idx], n_obs).squeeze(),
+        if dataset.covariates_idx is not None:
+            covs = [cov_idx[idx].repeat(n_obs) for cov_idx in dataset.covariates_idx]
+        else: covs = None
+        if dataset.drugs_idx is not None:
+            drugs = (
+                [dataset.drugs_idx[idx]] * n_obs,
+                [dataset.dosages[idx]] * n_obs,
+                [dataset.drugs_embeddings(dataset.drugs_idx[idx])] * n_obs
             )
-        else:
-            emb_drugs = repeat_n(dataset.drugs[idx], n_obs)
+        else: drugs = None
+        if dataset.knockouts_idx is not None:
+            knockouts = (
+                [dataset.knockouts_idx[idx]] * n_obs,
+                [dataset.knockouts_embeddings(dataset.knockouts_idx[idx])] * n_obs
+            )
+        else: knockouts = None
 
         # copies just the needed genes to GPU
         # Could try moving the whole genes tensor to GPU once for further speedups (but more memory problems)
@@ -394,8 +440,9 @@ def evaluate_r2_sc(autoencoder: ComPert, dataset: SubDataset):
         mean_pred, var_pred = compute_prediction(
             autoencoder,
             y_true,
-            emb_drugs,
-            emb_covs,
+            drugs,
+            knockouts,
+            covs,
         )
 
         # mean of r2 scores for current cell_drug_dose_comb
@@ -415,17 +462,17 @@ def evaluate_r2_sc(autoencoder: ComPert, dataset: SubDataset):
         #     continue
 
         mean_score.append(r2_m) if not r2_m == float("-inf") else inf_combinations.add(
-            cell_drug_dose_comb
+            cell_pert_comb
         )
         var_score.append(r2_v) if not r2_v == float("-inf") else inf_combinations.add(
-            cell_drug_dose_comb
+            cell_pert_comb
         )
         mean_score_de.append(r2_m_de) if not r2_m_de == float(
             "-inf"
-        ) else inf_combinations.add(cell_drug_dose_comb)
+        ) else inf_combinations.add(cell_pert_comb)
         var_score_de.append(r2_v_de) if not r2_v_de == float(
             "-inf"
-        ) else inf_combinations.add(cell_drug_dose_comb)
+        ) else inf_combinations.add(cell_pert_comb)
     print(
         f"{len(inf_combinations)} combinations had '-inf' R2 scores:\n\t {inf_combinations}"
     )
@@ -457,29 +504,54 @@ def evaluate(
     autoencoder.eval()
     if run_disentangle:
         logging.info("Running disentanglement evaluation")
-        drug_names, drug_counts = np.unique(
-            datasets["test"].drugs_names, return_counts=True
-        )
         disent_scores = evaluate_disentanglement(autoencoder, datasets["test"])
-        stats_disent_pert = disent_scores[0]
-        # optimal score == always predicting the most common drug
-        optimal_disent_score = max(drug_counts) / len(datasets["test"])
-        stats_disent_cov = disent_scores[1:]
+        if datasets["test"].num_drugs > 0:
+            logging.info("Running disentanglement evaluation")
+            drug_names, drug_counts = np.unique(
+                datasets["test"].drugs_names, return_counts=True
+            )
+            stats_disent_drug = disent_scores[0]
+            # optimal score == always predicting the most common drug
+            optimal_disent_score_drug = max(drug_counts) / len(datasets["test"])
+        else:
+            stats_disent_drug = None
+            optimal_disent_score_drug = None
+        if datasets['test'].num_knockouts > 0:
+            knockouts_names, knockouts_counts = np.unique(
+                datasets["test"].knockouts_names, return_counts=True
+            )
+            stats_disent_knockout = disent_scores[1]
+            # optimal score == always predicting the most common drug
+            optimal_disent_score_knockout = max(knockouts_counts) / len(datasets["test"])
+        else:
+            stats_disent_knockout = None
+            optimal_disent_score_knockout = None
+        if datasets['test'].num_covariates[0] > 0:
+            stats_disent_cov = disent_scores[2]
+            optimal_disent_cov = []
+            for cov in datasets['test'].covariates_idx:
+                most_common_element = torch.mode(cov)[0]
+                count_most_common = torch.sum(cov == most_common_element).item()
+                optimal_disent_cov.append(count_most_common / cov.size(0))
+        else:
+            stats_disent_cov = None
+            optimal_disent_cov = None
     else:
-        stats_disent_pert = [0]
-        optimal_disent_score = 0
-        stats_disent_cov = [0]
+        stats_disent_drug = None
+        optimal_disent_score_drug = None
+        stats_disent_knockout = None
+        optimal_disent_score_knockout = None
+        stats_disent_cov = None
+        optimal_disent_cov = None
 
     with torch.no_grad():
         evaluation_stats = {
-            "perturbation disentanglement": stats_disent_pert,
-            "optimal for perturbations": optimal_disent_score,
+            "drug-perturbation disentanglement": stats_disent_drug,
+            "optimal for drug perturbations": optimal_disent_score_drug,
+            "knockout-perturbation disentanglement": stats_disent_knockout,
+            "optimal for knockout perturbations": optimal_disent_score_knockout,
             "covariate disentanglement": stats_disent_cov,
-            "optimal for covariates": [
-                max(cov.mean(axis=0)).item() for cov in datasets["test"].covariates
-            ]  # mean over OHE embedding of covariates
-            if datasets["test"].num_covariates[0] > 0
-            else None,
+            "optimal for covariates": optimal_disent_cov
         }
 
         if run_r2:
@@ -540,14 +612,16 @@ def evaluate(
     return evaluation_stats
 
 
+"""
 def custom_collate(batch):
-    transposed = zip(*batch)
-    concat_batch = []
-    for samples in transposed:
-        if samples[0] is None:
-            concat_batch.append(None)
-        else:
-            # we move to CUDA here so that prefetching in the DataLoader already yields
-            # ready-to-process CUDA tensors
-            concat_batch.append(torch.stack(samples, 0).to("cuda"))
-    return concat_batch
+    genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, cov = zip(*batch)
+    genes = torch.stack(genes, 0).to(device)
+    drugs_idx = None if drugs_idx[0] is None else [d.to(device) for d in drugs_idx]
+    dosages = None if dosages[0] is None else [d.to(device) for d in dosages]
+    drugs_emb = None if drugs_emb[0] is None else [d.to(device) for d in drugs_emb]
+    knockouts_idx = None if knockouts_idx[0] is None else [d.to(device) for d in knockouts_idx]
+    knockouts_emb = None if knockouts_emb[0] is None else [d.to(device) for d in knockouts_emb]
+    cov = None if cov[0] is None else  torch.stack(cov, 0).to(device)
+    return [genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, cov]
+
+"""
