@@ -369,15 +369,6 @@ class ComPert(torch.nn.Module):
         if append_layer_width:
             self.num_genes = append_layer_width
 
-        self.degs_predictor = None
-        if self.multi_task:
-            self.degs_predictor = MLP(
-                [2 * self.hparams["dim"]]
-                + [2 * self.hparams["dim"]]
-                + [self.num_genes],
-                batch_norm=True,
-            )
-            self.loss_degs = FocalLoss()
 
         if self.num_drugs > 0:
             self.adversary_drugs = MLP(
@@ -477,7 +468,6 @@ class ComPert(torch.nn.Module):
             get_params(self.encoder, True)
             + get_params(self.decoder, True)
             + get_params(self.drug_embeddings, has_drugs and embedding_requires_grad)
-            + get_params(self.degs_predictor, self.multi_task)
             + get_params(self.drug_embedding_encoder, not self.enable_cpa_mode)
         )
         for emb in self.covariates_embeddings:
@@ -739,7 +729,6 @@ class ComPert(torch.nn.Module):
         drugs=None,
         drugs_idx=None,
         dosages=None,
-        degs=None,
         covariates_idx=None,
     ):
         """
@@ -762,10 +751,6 @@ class ComPert(torch.nn.Module):
         var = gene_reconstructions[:, dim:]
         reconstruction_loss = self.loss_autoencoder(input=mean, target=genes, var=var)
 
-        multi_task_loss = torch.tensor([0.0], device=self.device)
-        if self.multi_task:
-            degs_prediciton = self.degs_predictor(cell_drug_embedding)
-            multi_task_loss = self.loss_degs(degs_prediciton, degs)
 
         adversary_drugs_loss = torch.tensor([0.0], device=self.device)
         if self.num_drugs > 0:

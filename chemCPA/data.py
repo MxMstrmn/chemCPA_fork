@@ -73,7 +73,7 @@ class Dataset:
         dose_key=None,
         covariate_keys=None,
         smiles_key=None,
-        degs_key="rank_genes_groups_cov",
+        degs_key=None,
         pert_category="cov_drug_dose_name",
         split_key="split",
     ):
@@ -101,6 +101,9 @@ class Dataset:
             covariate_keys = [covariate_keys]
         self.covariate_keys = covariate_keys
         self.smiles_key = smiles_key
+        if degs_key is not None:
+            self.de_genes = data.uns[degs_key]
+        else: self.de_genes = None
 
         if perturbation_key is not None:
             if dose_key is None:
@@ -108,7 +111,6 @@ class Dataset:
                     f"A 'dose_key' is required when provided a 'perturbation_key'({perturbation_key})."
                 )
             self.pert_categories = np.array(data.obs[pert_category].values)
-            self.de_genes = data.uns[degs_key]
             self.drugs_names = np.array(data.obs[perturbation_key].values)
             self.dose_names = np.array(data.obs[dose_key].values)
 
@@ -193,25 +195,7 @@ class Dataset:
             "test": np.where(data.obs[split_key] == "test")[0].tolist(),
             "ood": np.where(data.obs[split_key] == "ood")[0].tolist(),
         }
-
-        # This could be made much faster
-        degs_tensor = []
-        for i in range(len(self)):
-            drug = indx(self.drugs_names, i)
-            cov = indx(self.covariate_names["cell_type"], i)
-
-            if drug == "JQ1":
-                drug = "(+)-JQ1"
-
-            if drug == "control":
-                genes = []
-            else:
-                genes = self.de_genes[f"{cov}_{drug}_1.0"]
-
-            degs_tensor.append(
-                torch.Tensor(self.var_names.isin(genes)).detach().clone()
-            )
-        self.degs = torch.stack(degs_tensor)
+ 
 
     def subset(self, split, condition="all"):
         idx = list(set(self.indices[split]) & set(self.indices[condition]))
@@ -229,7 +213,6 @@ class Dataset:
             self.genes[i],
             indx(self.drugs_idx, i),
             indx(self.dosages, i),
-            indx(self.degs, i),
             *[indx(cov, i) for cov in self.covariates_idx],
         )
 
@@ -272,14 +255,11 @@ class SubDataset:
         self.num_genes = dataset.num_genes
         self.num_drugs = dataset.num_drugs
 
-        self.degs = dataset.degs
-
     def __getitem__(self, i):
         return (
             self.genes[i],
             indx(self.drugs_idx, i),
             indx(self.dosages, i),
-            indx(self.degs, i),
             *[indx(cov, i) for cov in self.covariates],
         )
 
@@ -293,7 +273,7 @@ def load_dataset_splits(
     dose_key: Union[str, None],
     covariate_keys: Union[list, str, None],
     smiles_key: Union[str, None],
-    degs_key: str = "rank_genes_groups_cov",
+    degs_key: str = None,
     pert_category: str = "cov_drug_dose_name",
     split_key: str = "split",
     return_dataset: bool = False,
