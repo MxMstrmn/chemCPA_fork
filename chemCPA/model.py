@@ -53,12 +53,12 @@ class NBLoss(torch.nn.Module):
             # In this case, we reshape theta for broadcasting
             theta = theta.view(1, theta.size(0))
         t1 = (
-            torch.lgamma(theta + eps)
-            + torch.lgamma(y + 1.0)
-            - torch.lgamma(y + theta + eps)
+                torch.lgamma(theta + eps)
+                + torch.lgamma(y + 1.0)
+                - torch.lgamma(y + theta + eps)
         )
         t2 = (theta + y) * torch.log(1.0 + (mu / (theta + eps))) + (
-            y * (torch.log(theta + eps) - torch.log(mu + eps))
+                y * (torch.log(theta + eps) - torch.log(mu + eps))
         )
         final = t1 + t2
         final = _nan2inf(final)
@@ -175,12 +175,12 @@ class MLP(torch.nn.Module):
     """
 
     def __init__(
-        self,
-        sizes,
-        batch_norm=True,
-        last_layer_act="linear",
-        append_layer_width=None,
-        append_layer_position=None,
+            self,
+            sizes,
+            batch_norm=True,
+            last_layer_act="linear",
+            append_layer_width=None,
+            append_layer_position=None,
     ):
         super(MLP, self).__init__()
         layers = []
@@ -287,21 +287,21 @@ class ComPert(torch.nn.Module):
     num_knockouts: int # number of unqiue gene knockouts in the dataset, including control
 
     def __init__(
-        self,
-        num_genes: int,
-        num_drugs: int,
-        num_knockouts: int,
-        num_covariates: list,
-        device="cpu",
-        seed=0,
-        patience=5,
-        doser_type="logsigm",
-        knockout_effect_type="logsigm",
-        decoder_activation="linear",
-        hparams="",
-        drug_embedding_dimension=None,
-        knockout_embedding_dimension=None,
-        append_layer_width=None,
+            self,
+            num_genes: int,
+            num_drugs: int,
+            num_knockouts: int,
+            num_covariates: list,
+            device="cpu",
+            seed=0,
+            patience=5,
+            doser_type="logsigm",
+            knockout_effect_type="logsigm",
+            decoder_activation="linear",
+            hparams="",
+            drug_embedding_dimension=None,
+            knockout_embedding_dimension=None,
+            append_layer_width=None,
     ):
         super(ComPert, self).__init__()
         # set generic attributes
@@ -346,7 +346,7 @@ class ComPert(torch.nn.Module):
             + [self.hparams["dim"]],
             append_layer_width=append_layer_width,
             append_layer_position="first",
-        )
+            )
 
         self.decoder = MLP(
             [self.hparams["dim"]]
@@ -355,7 +355,7 @@ class ComPert(torch.nn.Module):
             last_layer_act=decoder_activation,
             append_layer_width=2 * append_layer_width if append_layer_width else None,
             append_layer_position="last",
-        )
+            )
 
         if append_layer_width:
             self.num_genes = append_layer_width
@@ -390,7 +390,7 @@ class ComPert(torch.nn.Module):
                             * self.hparams["dosers_depth"]
                             + [1],
                             batch_norm=False,
-                        )
+                            )
                     )
             elif doser_type == "amortized":
                 # should this also have `batch_norm=False`?
@@ -741,15 +741,15 @@ class ComPert(torch.nn.Module):
         return torch.stack([latent_knockout.sum(dim=0) for latent_knockout in latent_knockouts])
 
     def predict(
-        self,
-        genes,
-        drugs_idx=None,
-        dosages=None,
-        drugs_embeddings=None,
-        knockouts_idx=None,
-        knockouts_embeddings=None,
-        covariates_idx=None,
-        return_latent_basal=False,
+            self,
+            genes,
+            drugs_idx=None,
+            dosages=None,
+            drugs_embeddings=None,
+            knockouts_idx=None,
+            knockouts_embeddings=None,
+            covariates_idx=None,
+            return_latent_basal=False,
     ):
         """
         Predict "what would have the gene expression `genes` been, had the
@@ -810,14 +810,14 @@ class ComPert(torch.nn.Module):
         return self.patience_trials > self.patience
 
     def update(
-        self,
-        genes,
-        drugs_idx=None,
-        dosages=None,
-        drugs_embeddings=None,
-        knockouts_idx=None,
-        knockouts_embeddings=None,
-        covariates_idx=None,
+            self,
+            genes,
+            drugs_idx=None,
+            dosages=None,
+            drugs_embeddings=None,
+            knockouts_idx=None,
+            knockouts_embeddings=None,
+            covariates_idx=None,
     ):
         """
         Update model's parameters given a minibatch of genes, drugs, knockouts and
@@ -896,12 +896,12 @@ class ComPert(torch.nn.Module):
 
             self.optimizer_adversaries.zero_grad()
             (
-                adversary_drugs_loss
-                + self.hparams["penalty_adversary"] * adv_drugs_grad_penalty
-                + adversary_knockouts_loss
-                + self.hparams["penalty_adversary"] * adv_knockouts_grad_penalty
-                + adversary_covariates_loss
-                + self.hparams["penalty_adversary"] * adv_covs_grad_penalty
+                    adversary_drugs_loss
+                    + self.hparams["penalty_adversary"] * adv_drugs_grad_penalty
+                    + adversary_knockouts_loss
+                    + self.hparams["penalty_adversary"] * adv_knockouts_grad_penalty
+                    + adversary_covariates_loss
+                    + self.hparams["penalty_adversary"] * adv_covs_grad_penalty
             ).backward()
             self.optimizer_adversaries.step()
         else:
@@ -911,10 +911,10 @@ class ComPert(torch.nn.Module):
             if self.num_knockouts > 0:
                 self.optimizer_knockout_effects.zero_grad()
             (
-                reconstruction_loss
-                - self.hparams["reg_adversary_drug"] * adversary_drugs_loss
-                - self.hparams["reg_adversary_knockout"] * adversary_knockouts_loss
-                - self.hparams["reg_adversary_cov"] * adversary_covariates_loss
+                    reconstruction_loss
+                    - self.hparams["reg_adversary_drug"] * adversary_drugs_loss
+                    - self.hparams["reg_adversary_knockout"] * adversary_knockouts_loss
+                    - self.hparams["reg_adversary_cov"] * adversary_covariates_loss
             ).backward()
             self.optimizer_autoencoder.step()
             if self.num_drugs > 0:

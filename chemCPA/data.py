@@ -11,28 +11,6 @@ from rdkit import Chem
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
-def ranks_to_df(data, key="rank_genes_groups"):
-    """Converts an `sc.tl.rank_genes_groups` result into a MultiIndex dataframe.
-
-    You can access various levels of the MultiIndex with `df.loc[[category]]`.
-
-    Params
-    ------
-    data : `AnnData`
-    key : str (default: 'rank_genes_groups')
-        Field in `.uns` of data where `sc.tl.rank_genes_groups` result is
-        stored.
-    """
-    d = data.uns[key]
-    dfs = []
-    for k in d.keys():
-        if k == "params":
-            continue
-        series = pd.DataFrame.from_records(d[k]).unstack()
-        series.name = k
-        dfs.append(series)
-
-    return pd.concat(dfs, axis=1)
 def canonicalize_smiles(smiles: Optional[str]):
     if smiles:
         return Chem.CanonSmiles(smiles)
@@ -75,18 +53,18 @@ class Dataset:
     knockouts_names_unique_sorted: np.ndarray #sorted list of all gene knockout names in the dataset
 
     def __init__(
-        self,
-        data: str,
-        drug_key=None,
-        dose_key=None,
-        drugs_embeddings=None,
-        knockout_key=None,
-        knockouts_embeddings=None,
-        covariate_keys=None,
-        smiles_key=None,
-        degs_key=None,
-        pert_category="cov_geneid",
-        split_key="split",
+            self,
+            data: str,
+            drug_key=None,
+            dose_key=None,
+            drugs_embeddings=None,
+            knockout_key=None,
+            knockouts_embeddings=None,
+            covariate_keys=None,
+            smiles_key=None,
+            pert_category="cov_geneid",
+            split_key="split",
+            degs_key = 'rank_genes_groups_cov'
 
     ):
         """
@@ -239,7 +217,7 @@ class Dataset:
             self._covariates_names_to_idx = {}
             self.covariates_idx = []
             for cov in covariate_keys:
-                # assume each cell only falls into one covariate category
+                #assume each cell only falls into one covariate category
                 self.covariate_names[cov] = np.array(data.obs[cov].values)
                 self.covariate_names_unique[cov] = np.unique(self.covariate_names[cov])
                 self._covariates_names_to_idx[cov] = {
@@ -323,17 +301,14 @@ class SubDataset:
         self.genes = dataset.genes[indices]
         self.drugs_idx = indx(dataset.drugs_idx, indices)
         self.dosages = indx(dataset.dosages, indices)
-        self.covariates_idx = [indx(cov, indices) for cov in dataset.covariates_idx] if dataset.covariates_idx is not None else None
         self.knockouts_idx = indx(dataset.knockouts_idx, indices)
+        self.covariates_idx = [indx(cov, indices) for cov in dataset.covariates_idx] if dataset.covariates_idx is not None else None
 
 
         self.drugs_names = indx(dataset.drugs_names, indices)
         self.knockouts_names = indx(dataset.knockouts_names, indices)
         self.pert_categories = indx(dataset.pert_categories, indices)
         self.covariate_names = {}
-        assert (
-            "cell_type" in self.covariate_keys
-        ), "`cell_type` must be provided as a covariate"
         for cov in self.covariate_keys:
             self.covariate_names[cov] = indx(dataset.covariate_names[cov], indices)
 
@@ -364,18 +339,18 @@ class SubDataset:
 
 
 def load_dataset_splits(
-    dataset_path: str,
-    drug_key: Union[str, None],
-    dose_key: Union[str, None],
-    knockout_key: Union[str, None],
-    covariate_keys: Union[list, str, None],
-    smiles_key: Union[str, None],
-    degs_key=None,
-    pert_category: str = "cov_geneid",
-    split_key: str = "split",
-    return_dataset: bool = False,
-    drugs_embeddings = None,
-    knockouts_embeddings = None
+        dataset_path: str,
+        drug_key: Union[str, None],
+        dose_key: Union[str, None],
+        knockout_key: Union[str, None],
+        covariate_keys: Union[list, str, None],
+        smiles_key: Union[str, None],
+        pert_category: str = "cov_geneid",
+        split_key: str = "split",
+        degs_key='rank_genes_groups_cov',
+        return_dataset: bool = False,
+        drugs_embeddings = None,
+        knockouts_embeddings = None
 ):
     dataset = Dataset(
         dataset_path,
@@ -386,9 +361,9 @@ def load_dataset_splits(
         knockouts_embeddings,
         covariate_keys,
         smiles_key,
-        degs_key,
         pert_category,
         split_key,
+        degs_key
     )
 
     splits = {
