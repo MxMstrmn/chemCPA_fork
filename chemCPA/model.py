@@ -145,6 +145,26 @@ class GaussianLoss(torch.nn.Module):
         return (term1 + term2).mean()
 
 
+class CELoss(torch.nn.Module):
+    def __init__(self):
+        super(CELoss, self).__init__()
+
+    def forward(self, preds, targets):
+        """
+        Used for calculating the cross entropy loss when multiclass targets exist
+        @param preds: dimension [batch_size, total_num_perts]
+        @param target: an array or list of tensors, each tensor is of dim [num_target_in_cell]
+        """
+
+        softmax = torch.nn.Softmax(dim=1)
+        preds = softmax(preds)
+
+        batch_size = len(targets)
+        preds = [preds[j,:][targets[j]] for j in range(batch_size)]
+        loss = torch.tensor([-torch.log(pred).sum() for pred in preds])
+        return (loss.sum() / batch_size)
+
+
 class MLP(torch.nn.Module):
     """
     A multilayer perceptron with ReLU activations and optional BatchNorm.
