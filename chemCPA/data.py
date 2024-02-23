@@ -7,11 +7,9 @@ import pandas as pd
 import scanpy as sc
 import torch
 from anndata import AnnData
-
-from chemCPA.helper import canonicalize_smiles
+from rdkit import Chem
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
-
 
 def ranks_to_df(data, key="rank_genes_groups"):
     """Converts an `sc.tl.rank_genes_groups` result into a MultiIndex dataframe.
@@ -35,10 +33,14 @@ def ranks_to_df(data, key="rank_genes_groups"):
         dfs.append(series)
 
     return pd.concat(dfs, axis=1)
-
+def canonicalize_smiles(smiles: Optional[str]):
+    if smiles:
+        return Chem.CanonSmiles(smiles)
+    else:
+        return None
 
 def drug_names_to_once_canon_smiles(
-    drug_names: List[str], dataset: sc.AnnData, perturbation_key: str, smiles_key: str
+        drug_names: List[str], dataset: sc.AnnData, perturbation_key: str, smiles_key: str
 ):
     """
     Converts a list of drug names to a list of SMILES. The ordering is of the list is preserved.
@@ -52,34 +54,41 @@ def drug_names_to_once_canon_smiles(
             [perturbation_key, smiles_key]
         ).groups.keys()
     }
-    return [name_to_smiles_map[name] for name in drug_names]
+    return [name_to_smiles_map.get(name) for name in drug_names]
 
 
-indx = lambda a, i: a[i] if a is not None else None
+def indx(a,i):
+    if isinstance(a, torch.nn.Embedding) and isinstance(i, torch.Tensor):
+        return a(i)
+    elif a is not None:
+        return a[i]
+    else:
+        return None
 
 
 class Dataset:
     covariate_keys: Optional[List[str]]
-    drugs: torch.Tensor  # stores the (OneHot * dosage) encoding of drugs / combinations of drugs
-    drugs_idx: torch.Tensor  # stores the integer index of the drugs applied to each cell.
-    max_num_perturbations: int  # how many drugs are applied to each cell at the same time?
-    dosages: torch.Tensor  # shape: (dataset_size, max_num_perturbations)
+    drugs_idx: list  # stores the integer indices of the drugs applied to each cell.
+    dosages: list  # stores the dosages of drugs applied to each cell
     drugs_names_unique_sorted: np.ndarray  # sorted list of all drug names in the dataset
 
     def __init__(
         self,
         data: str,
-        perturbation_key=None,
+        drug_key=None,
         dose_key=None,
+        drugs_embeddings=None,
         covariate_keys=None,
         smiles_key=None,
         degs_key=None,
-        pert_category="cov_drug_dose_name",
+        pert_category="cov_geneid",
         split_key="split",
+
     ):
         """
         :param covariate_keys: Names of obs columns which stores covariate names (eg cell type).
-        :param perturbation_key: Name of obs column which stores perturbation name (eg drug name).
+        :param drug_key: Name of obs column which stores drug-perturbation name (eg drug name).
+            Combinations of perturbations are separated with `+`.
             Combinations of perturbations are separated with `+`.
         :param dose_key: Name of obs column which stores perturbation dose.
             Combinations of perturbations are separated with `+`.
@@ -93,9 +102,10 @@ class Dataset:
             data = sc.read(data)
         logging.info(f"Finished data loading.")
         self.genes = torch.Tensor(data.X.A)
+        self.num_genes = self.genes.shape[1]
         self.var_names = data.var_names
 
-        self.perturbation_key = perturbation_key
+        self.drug_key = drug_key
         self.dose_key = dose_key
         if isinstance(covariate_keys, str):
             covariate_keys = [covariate_keys]
@@ -105,13 +115,13 @@ class Dataset:
             self.de_genes = data.uns[degs_key]
         else: self.de_genes = None
 
-        if perturbation_key is not None:
+        if drug_key is not None:
             if dose_key is None:
                 raise ValueError(
-                    f"A 'dose_key' is required when provided a 'perturbation_key'({perturbation_key})."
+                    f"A 'dose_key' is required when provided a 'drug_key'({drug_key})."
                 )
-            self.pert_categories = np.array(data.obs[pert_category].values)
-            self.drugs_names = np.array(data.obs[perturbation_key].values)
+
+            self.drugs_names = np.array(data.obs[drug_key].values)
             self.dose_names = np.array(data.obs[dose_key].values)
 
             # get unique drugs
@@ -119,41 +129,58 @@ class Dataset:
             for d in self.drugs_names:
                 [drugs_names_unique.add(i) for i in d.split("+")]
 
-            self.drugs_names_unique_sorted = np.array(sorted(drugs_names_unique))
+            self.drugs_names_unique_sorted = list(sorted(drugs_names_unique))
+            self.num_drugs = len(self.drugs_names_unique_sorted)
+
+            #only allow for one unqiue name for control
+            self.drug_ctrl_name = np.unique(data[data.obs["control"] == 1].obs[self.drug_key])[0]
+
 
             self._drugs_name_to_idx = {
                 smiles: idx for idx, smiles in enumerate(self.drugs_names_unique_sorted)
             }
             self.canon_smiles_unique_sorted = drug_names_to_once_canon_smiles(
-                list(self.drugs_names_unique_sorted), data, perturbation_key, smiles_key
-            )
-            self.max_num_perturbations = max(
-                len(name.split("+")) for name in self.drugs_names
+                list(self.drugs_names_unique_sorted), data, drug_key, smiles_key
             )
 
-            assert (
-                self.max_num_perturbations == 1
-            ), "Index-based drug encoding only works with single perturbations"
-            drugs_idx = [self.drug_name_to_idx(drug) for drug in self.drugs_names]
-            self.drugs_idx = torch.tensor(
-                drugs_idx,
-                dtype=torch.long,
-            )
-            dosages = [float(dosage) for dosage in self.dose_names]
-            self.dosages = torch.tensor(
-                dosages,
-                dtype=torch.float32,
-            )
+
+            drugs_idx = []
+            for comb in self.drugs_names:
+                drugs_combos = comb.split("+")
+                drugs_combos_idx = [self._drugs_name_to_idx[name] for name in drugs_combos]
+                drugs_combos_idx = torch.tensor(drugs_combos_idx, dtype=torch.int32)
+                drugs_idx.append(drugs_combos_idx)
+            self.drugs_idx = np.array(drugs_idx, dtype=object)
+
+            dosages = []
+            for comb in self.dose_names:
+                dosages_combos = comb.split("+")
+                dosages_combos = [float(i) for i in dosages_combos]
+                dosages_combos = torch.tensor(dosages_combos, dtype=torch.float32)
+                dosages.append(dosages_combos)
+            self.dosages = np.array(dosages, dtype=object)
+
+            if isinstance(drugs_embeddings, torch.nn.Embedding):
+                self.drugs_embeddings = drugs_embeddings
+            elif isinstance(drugs_embeddings, str):
+                drugs_embeddings_df = pd.read_parquet(drugs_embeddings)
+                drugs_embeddings = torch.tensor(drugs_embeddings_df.loc[self.canon_smiles_unique_sorted].values,
+                                                dtype=torch.float32, device=self.device)
+                self.drugs_embeddings = torch.nn.Embedding.from_pretrained(drugs_embeddings, freeze=True)
+            else:
+                # maybe provided with None, create random embeddings
+                self.drugs_embeddings = torch.nn.Embedding(self.num_drugs, 256, _freeze=True)
 
         else:
-            self.pert_categories = None
-            self.de_genes = None
             self.drugs_names = None
             self.dose_names = None
             self.drugs_names_unique_sorted = None
-            self.atomic_drugs_dict = None
-            self.drug_dict = None
-            self.drugs = None
+            self.num_drugs = 0
+            self.drugs_idx = None
+            self.dosages = None
+            self.drug_ctrl_name = None
+            self.drugs_embeddings = None
+
 
         if isinstance(covariate_keys, list) and covariate_keys:
             if not len(covariate_keys) == len(set(covariate_keys)):
@@ -171,22 +198,21 @@ class Dataset:
                 }
                 covariate_idx = [self._covariates_names_to_idx[cov][cov_name] for cov_name in self.covariate_names[cov]]
                 self.covariates_idx.append(torch.tensor(covariate_idx, dtype=torch.int32))
+            self.num_covariates = [
+                len(names) for names in self.covariate_names_unique.values()
+            ]
         else:
             self.covariate_names = None
             self.covariate_names_unique = None
             self.covariates_idx = None
             self.num_covariates = [0]
 
+        if pert_category is not None:
+            self.pert_categories = np.array(data.obs[pert_category].values)
+        else: self.pert_categories = None
+
+
         self.ctrl = data.obs["control"].values
-
-        if perturbation_key is not None:
-            self.ctrl_name = list(
-                np.unique(data[data.obs["control"] == 1].obs[self.perturbation_key])
-            )
-        else:
-            self.ctrl_name = None
-
-
         self.indices = {
             "all": list(range(len(self.genes))),
             "control": np.where(data.obs["control"] == 1)[0].tolist(),
@@ -195,7 +221,7 @@ class Dataset:
             "test": np.where(data.obs[split_key] == "test")[0].tolist(),
             "ood": np.where(data.obs[split_key] == "ood")[0].tolist(),
         }
- 
+
 
     def subset(self, split, condition="all"):
         idx = list(set(self.indices[split]) & set(self.indices[condition]))
@@ -208,13 +234,16 @@ class Dataset:
         """
         return self._drugs_name_to_idx[drug_name]
 
+
     def __getitem__(self, i):
         return (
             self.genes[i],
             indx(self.drugs_idx, i),
             indx(self.dosages, i),
+            indx(self.drugs_embeddings, indx(self.drugs_idx, i)),
             *[indx(cov, i) for cov in self.covariates_idx],
         )
+
 
     def __len__(self):
         return len(self.genes)
@@ -226,12 +255,11 @@ class SubDataset:
     """
 
     def __init__(self, dataset: Dataset, indices):
-        self.perturbation_key = dataset.perturbation_key
+        self.drug_key = dataset.drug_key
         self.dose_key = dataset.dose_key
         self.covariate_keys = dataset.covariate_keys
         self.smiles_key = dataset.smiles_key
-
-        self.covars_dict = dataset.atomic_сovars_dict
+        self.drugs_embeddings = dataset.drugs_embeddings
 
         self.genes = dataset.genes[indices]
         self.drugs_idx = indx(dataset.drugs_idx, indices)
@@ -242,25 +270,27 @@ class SubDataset:
         self.pert_categories = indx(dataset.pert_categories, indices)
         self.covariate_names = {}
         assert (
-            "cell_type" in self.covars_dict
+            "cell_type" in self.covariate_keys
         ), "`cell_type` must be provided as a covariate"
         for cov in self.covariate_keys:
             self.covariate_names[cov] = indx(dataset.covariate_names[cov], indices)
 
         self.var_names = dataset.var_names
         self.de_genes = dataset.de_genes
-        self.ctrl_name = indx(dataset.ctrl_name, 0)
+        self.drug_ctrl_name = dataset.drug_ctrl_name
 
         self.num_covariates = dataset.num_covariates
         self.num_genes = dataset.num_genes
         self.num_drugs = dataset.num_drugs
+
 
     def __getitem__(self, i):
         return (
             self.genes[i],
             indx(self.drugs_idx, i),
             indx(self.dosages, i),
-            *[indx(cov, i) for cov in self.covariates],
+            indx(self.drugs_embeddings, indx(self.drugs_idx, i)),
+            *[indx(cov, i) for cov in self.covariates_idx],
         )
 
     def __len__(self):
@@ -269,19 +299,21 @@ class SubDataset:
 
 def load_dataset_splits(
     dataset_path: str,
-    perturbation_key: Union[str, None],
+    drug_key: Union[str, None],
     dose_key: Union[str, None],
     covariate_keys: Union[list, str, None],
     smiles_key: Union[str, None],
-    degs_key: str = None,
-    pert_category: str = "cov_drug_dose_name",
+    degs_key=None,
+    pert_category: str = "cov_geneid",
     split_key: str = "split",
     return_dataset: bool = False,
+    drugs_embeddings = None,
 ):
     dataset = Dataset(
         dataset_path,
-        perturbation_key,
+        drug_key,
         dose_key,
+        drugs_embeddings,
         covariate_keys,
         smiles_key,
         degs_key,

@@ -261,7 +261,7 @@ class GeneralizedSigmoid(torch.nn.Module):
             torch.zeros(1, dim, device=device), requires_grad=True
         )
 
-    def forward(self, x, idx=None):
+    def forward(self, x, idx: list):
         if self.nonlin == "logsigm":
             if idx is None:
                 c0 = self.bias.sigmoid()
@@ -312,7 +312,7 @@ class ComPert(torch.nn.Module):
         doser_type="logsigm",
         decoder_activation="linear",
         hparams="",
-        drug_embeddings: Union[None, torch.nn.Embedding] = None,
+        drug_embedding_dimension=None,
         append_layer_width=None,
         multi_task: bool = False,
         enable_cpa_mode=False,
@@ -324,6 +324,7 @@ class ComPert(torch.nn.Module):
         self.num_covariates = num_covariates
         self.device = device
         self.seed = seed
+        self.drug_embedding_dimension = drug_embedding_dimension
         # early-stopping
         self.patience = patience
         self.best_score = -1e3
@@ -420,7 +421,7 @@ class ComPert(torch.nn.Module):
             elif doser_type == "amortized":
                 # should this also have `batch_norm=False`?
                 self.dosers = MLP(
-                    [self.drug_embeddings.embedding_dim + 1]
+                    [self.drug_embedding_dimension + 1]
                     + [self.hparams["dosers_width"]] * self.hparams["dosers_depth"]
                     + [1],
                 )
@@ -578,22 +579,23 @@ class ComPert(torch.nn.Module):
 
         return self.hparams
 
-    def compute_drug_embeddings_(self, drugs=None, drugs_idx=None, dosages=None):
+    def compute_drug_embeddings_(self, drugs_idx, dosages, drugs_embeddings):
         """
         Compute sum of drug embeddings, each of them multiplied by its
         dose-response curve.
 
-
-        @param drugs: A vector of dim [batch_size, num_drugs], where each entry contains the dose of that drug.
-        @param drugs_idx: A vector of dim [batch_size]. Each entry contains the index of the applied drug. The
-            index is ∈ [0, num_drugs).
-        @param dosages: A vector of dim [batch_size]. Each entry contains the dose of the applied drug.
+        @param drugs_idx: an array or list of tensor containing drug indices for each selected cell, and the indices of each cell is
+                        of dim [num_drugs_in_cell]
+        @param dosages: an array or list of tensor containing drug dosages for each selected cell, and the dosage of each cell is
+                        of dim [num_drugs_in_cell]
+        @param drugs_embeddings: an array or list of tensor containing drug embeddings for each selected cell, and the drug embedding is
+                                of dim [num_drugs_in_cell, drug_embedding_dim]
         @return: a tensor of shape [batch_size, drug_embedding_dimension]
         """
-        assert (drugs is not None) or (drugs_idx is not None and dosages is not None)
+        assert (drugs_idx is not None and dosages is not None)
 
-        drugs, drugs_idx, dosages = _move_inputs(
-            drugs, drugs_idx, dosages, device=self.device
+        drugs_idx, dosages, drugs_embeddings = _move_inputs(
+            drugs_idx, dosages, drugs_embeddings, device=self.device
         )
 
         latent_drugs = self.drug_embeddings.weight
@@ -659,9 +661,9 @@ class ComPert(torch.nn.Module):
     def predict(
         self,
         genes,
-        drugs=None,
         drugs_idx=None,
         dosages=None,
+        drugs_embeddings=None,
         covariates_idx=None,
         return_latent_basal=False,
     ):
@@ -681,19 +683,14 @@ class ComPert(torch.nn.Module):
 
         if self.num_drugs > 0:
             drug_embedding = self.compute_drug_embeddings_(
-                drugs=drugs, drugs_idx=drugs_idx, dosages=dosages
+                drugs_idx=drugs_idx, dosages=dosages, drugs_embeddings=drugs_embeddings
             )
-            # latent_treated = latent_treated + self.drug_embedding_encoder(
-            #     drug_embedding
-            # )
             latent_treated = latent_treated + drug_embedding
         if self.num_covariates[0] > 0:
             for cov_type, emb_cov in enumerate(self.covariates_embeddings):
                 emb_cov = emb_cov.to(self.device)
                 cov_idx = covariates_idx[cov_type]
                 latent_treated = latent_treated + emb_cov(cov_idx)
-
-        cell_drug_embedding = torch.cat([emb_cov(cov_idx), drug_embedding], dim=1)
 
         gene_reconstructions = self.decoder(latent_treated)
 
@@ -704,14 +701,15 @@ class ComPert(torch.nn.Module):
         normalized_reconstructions = torch.concat([mean, var], dim=1)
 
         if return_latent_basal:
-            return normalized_reconstructions, cell_drug_embedding, latent_basal
+            return normalized_reconstructions, latent_basal
 
-        return normalized_reconstructions, cell_drug_embedding
+        return normalized_reconstructions
 
     def early_stopping(self, score):
         """
         Possibly early-stops training.
         """
+        #is there a need to store the model params corresponding to the best score?
         if score is None:
             # TODO don't really know what to do here
             logging.warning("Early stopping score was None!")
@@ -726,9 +724,9 @@ class ComPert(torch.nn.Module):
     def update(
         self,
         genes,
-        drugs=None,
         drugs_idx=None,
         dosages=None,
+        drugs_embeddings=None,
         covariates_idx=None,
     ):
         """
@@ -739,9 +737,9 @@ class ComPert(torch.nn.Module):
 
         gene_reconstructions, cell_drug_embedding, latent_basal = self.predict(
             genes=genes,
-            drugs=drugs,
             drugs_idx=drugs_idx,
             dosages=dosages,
+            drugs_embeddings=drugs_embeddings,
             covariates_idx=covariates_idx,
             return_latent_basal=True,
         )
