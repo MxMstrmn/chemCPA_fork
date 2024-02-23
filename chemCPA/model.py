@@ -300,7 +300,6 @@ class ComPert(torch.nn.Module):
     """
 
     num_drugs: int  # number of unique drugs in the dataset, including control
-    use_drugs_idx: bool  # whether to except drugs coded by index or by OneHotEncoding
 
     def __init__(
         self,
@@ -314,7 +313,6 @@ class ComPert(torch.nn.Module):
         decoder_activation="linear",
         hparams="",
         drug_embeddings: Union[None, torch.nn.Embedding] = None,
-        use_drugs_idx=False,
         append_layer_width=None,
         multi_task: bool = False,
         enable_cpa_mode=False,
@@ -330,7 +328,6 @@ class ComPert(torch.nn.Module):
         self.patience = patience
         self.best_score = -1e3
         self.patience_trials = 0
-        self.use_drugs_idx = use_drugs_idx
         self.multi_task = multi_task
         self.enable_cpa_mode = enable_cpa_mode
 
@@ -350,7 +347,6 @@ class ComPert(torch.nn.Module):
             "doser_type": doser_type,
             "decoder_activation": decoder_activation,
             "hparams": hparams,
-            "use_drugs_idx": use_drugs_idx,
         }
 
         self.encoder = MLP(
@@ -431,9 +427,6 @@ class ComPert(torch.nn.Module):
                         )
                     )
             elif doser_type == "amortized":
-                assert (
-                    use_drugs_idx
-                ), "Amortized doser not yet implemented for `use_drugs_idx=False`"
                 # should this also have `batch_norm=False`?
                 self.dosers = MLP(
                     [self.drug_embeddings.embedding_dim + 1]
@@ -594,8 +587,6 @@ class ComPert(torch.nn.Module):
         Compute sum of drug embeddings, each of them multiplied by its
         dose-response curve.
 
-        If use_drugs_idx is True, then drugs_idx and dosages will be set.
-        If use_drugs_idx is False, then drugs will be set.
 
         @param drugs: A vector of dim [batch_size, num_drugs], where each entry contains the dose of that drug.
         @param drugs_idx: A vector of dim [batch_size]. Each entry contains the index of the applied drug. The
@@ -773,14 +764,9 @@ class ComPert(torch.nn.Module):
         adversary_drugs_loss = torch.tensor([0.0], device=self.device)
         if self.num_drugs > 0:
             adversary_drugs_predictions = self.adversary_drugs(latent_basal)
-            if self.use_drugs_idx:
-                adversary_drugs_loss = self.loss_adversary_drugs(
-                    adversary_drugs_predictions, drugs_idx
-                )
-            else:
-                adversary_drugs_loss = self.loss_adversary_drugs(
-                    adversary_drugs_predictions, drugs.gt(0).float()
-                )
+            adversary_drugs_loss = self.loss_adversary_drugs(
+                adversary_drugs_predictions, drugs_idx
+            )
 
         adversary_covariates_loss = torch.tensor([0.0], device=self.device)
         if self.num_covariates[0] > 0:
