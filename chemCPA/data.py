@@ -7,7 +7,6 @@ import pandas as pd
 import scanpy as sc
 import torch
 from anndata import AnnData
-from sklearn.preprocessing import OneHotEncoder
 
 from chemCPA.helper import canonicalize_smiles
 
@@ -159,29 +158,22 @@ class Dataset:
                 raise ValueError(f"Duplicate keys were given in: {covariate_keys}")
             self.covariate_names = {}
             self.covariate_names_unique = {}
-            self.atomic_сovars_dict = {}
-            self.covariates = []
+            self._covariates_names_to_idx = {}
+            self.covariates_idx = []
             for cov in covariate_keys:
+                # assume each cell only falls into one covariate category
                 self.covariate_names[cov] = np.array(data.obs[cov].values)
                 self.covariate_names_unique[cov] = np.unique(self.covariate_names[cov])
-
-                names = self.covariate_names_unique[cov]
-                encoder_cov = OneHotEncoder(sparse=False)
-                encoder_cov.fit(names.reshape(-1, 1))
-
-                self.atomic_сovars_dict[cov] = dict(
-                    zip(list(names), encoder_cov.transform(names.reshape(-1, 1)))
-                )
-
-                names = self.covariate_names[cov]
-                self.covariates.append(
-                    torch.Tensor(encoder_cov.transform(names.reshape(-1, 1))).float()
-                )
+                self._covariates_names_to_idx[cov] = {
+                    cov_name: idx for idx, cov_name in enumerate(self.covariate_names_unique[cov])
+                }
+                covariate_idx = [self._covariates_names_to_idx[cov][cov_name] for cov_name in self.covariate_names[cov]]
+                self.covariates_idx.append(torch.tensor(covariate_idx, dtype=torch.int32))
         else:
             self.covariate_names = None
             self.covariate_names_unique = None
-            self.atomic_сovars_dict = None
-            self.covariates = None
+            self.covariates_idx = None
+            self.num_covariates = [0]
 
         self.ctrl = data.obs["control"].values
 
@@ -192,18 +184,6 @@ class Dataset:
         else:
             self.ctrl_name = None
 
-        if self.covariates is not None:
-            self.num_covariates = [
-                len(names) for names in self.covariate_names_unique.values()
-            ]
-        else:
-            self.num_covariates = [0]
-        self.num_genes = self.genes.shape[1]
-        self.num_drugs = (
-            len(self.drugs_names_unique_sorted)
-            if self.drugs_names_unique_sorted is not None
-            else 0
-        )
 
         self.indices = {
             "all": list(range(len(self.genes))),
@@ -250,7 +230,7 @@ class Dataset:
             indx(self.drugs_idx, i),
             indx(self.dosages, i),
             indx(self.degs, i),
-            *[indx(cov, i) for cov in self.covariates],
+            *[indx(cov, i) for cov in self.covariates_idx],
         )
 
     def __len__(self):
@@ -273,7 +253,7 @@ class SubDataset:
         self.genes = dataset.genes[indices]
         self.drugs_idx = indx(dataset.drugs_idx, indices)
         self.dosages = indx(dataset.dosages, indices)
-        self.covariates = [indx(cov, indices) for cov in dataset.covariates]
+        self.covariates_idx = [indx(cov, indices) for cov in dataset.covariates_idx] if dataset.covariates_idx is not None else None
 
         self.drugs_names = indx(dataset.drugs_names, indices)
         self.pert_categories = indx(dataset.pert_categories, indices)

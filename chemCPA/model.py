@@ -305,7 +305,7 @@ class ComPert(torch.nn.Module):
         self,
         num_genes: int,
         num_drugs: int,
-        num_covariates: int,
+        num_covariates: list,
         device="cpu",
         seed=0,
         patience=5,
@@ -482,6 +482,9 @@ class ComPert(torch.nn.Module):
         )
         for emb in self.covariates_embeddings:
             _parameters.extend(get_params(emb, has_covariates))
+        if has_covariates:
+            for emb in self.covariates_embeddings:
+                _parameters.extend(get_params(emb))
 
         self.optimizer_autoencoder = torch.optim.Adam(
             _parameters,
@@ -492,6 +495,9 @@ class ComPert(torch.nn.Module):
         _parameters = get_params(self.adversary_drugs, has_drugs)
         for adv in self.adversary_covariates:
             _parameters.extend(get_params(adv, has_covariates))
+        if has_covariates:
+            for adv in self.adversary_covariates:
+                _parameters.extend(get_params(adv))
 
         self.optimizer_adversaries = torch.optim.Adam(
             _parameters,
@@ -666,7 +672,7 @@ class ComPert(torch.nn.Module):
         drugs=None,
         drugs_idx=None,
         dosages=None,
-        covariates=None,
+        covariates_idx=None,
         return_latent_basal=False,
     ):
         """
@@ -674,9 +680,9 @@ class ComPert(torch.nn.Module):
         cells in `genes` with cell types `cell_types` been treated with
         combination of drugs `drugs`.
         """
-        assert (drugs is not None) or (drugs_idx is not None and dosages is not None)
-        genes, drugs, drugs_idx, dosages, covariates = _move_inputs(
-            genes, drugs, drugs_idx, dosages, covariates, device=self.device
+
+        genes, drugs_idx, dosages, drugs_embeddings, knockouts_idx, knockouts_embeddings, covariates_idx = _move_inputs(
+            genes, drugs_idx, dosages, drugs_embeddings, knockouts_idx, knockouts_embeddings, covariates_idx, device=self.device
         )
 
         latent_basal = self.encoder(genes)
@@ -694,7 +700,7 @@ class ComPert(torch.nn.Module):
         if self.num_covariates[0] > 0:
             for cov_type, emb_cov in enumerate(self.covariates_embeddings):
                 emb_cov = emb_cov.to(self.device)
-                cov_idx = covariates[cov_type].argmax(1)
+                cov_idx = covariates_idx[cov_type]
                 latent_treated = latent_treated + emb_cov(cov_idx)
 
         cell_drug_embedding = torch.cat([emb_cov(cov_idx), drug_embedding], dim=1)
@@ -734,7 +740,7 @@ class ComPert(torch.nn.Module):
         drugs_idx=None,
         dosages=None,
         degs=None,
-        covariates=None,
+        covariates_idx=None,
     ):
         """
         Update ComPert's parameters given a minibatch of genes, drugs, and
@@ -747,7 +753,7 @@ class ComPert(torch.nn.Module):
             drugs=drugs,
             drugs_idx=drugs_idx,
             dosages=dosages,
-            covariates=covariates,
+            covariates_idx=covariates_idx,
             return_latent_basal=True,
         )
 
@@ -775,7 +781,7 @@ class ComPert(torch.nn.Module):
                 adv = adv.to(self.device)
                 adversary_covariate_predictions.append(adv(latent_basal))
                 adversary_covariates_loss += self.loss_adversary_covariates[i](
-                    adversary_covariate_predictions[-1], covariates[i].argmax(1)
+                    adversary_covariate_predictions[-1], covariates_idx[i]
                 )
 
         # two place-holders for when adversary is not executed
