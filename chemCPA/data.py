@@ -69,8 +69,10 @@ def indx(a,i):
 class Dataset:
     covariate_keys: Optional[List[str]]
     drugs_idx: list  # stores the integer indices of the drugs applied to each cell.
+    knockouts_idx: list  #stores the integer indices of the gene knockouts applied to each cell
     dosages: list  # stores the dosages of drugs applied to each cell
     drugs_names_unique_sorted: np.ndarray  # sorted list of all drug names in the dataset
+    knockouts_names_unique_sorted: np.ndarray #sorted list of all gene knockout names in the dataset
 
     def __init__(
         self,
@@ -78,6 +80,8 @@ class Dataset:
         drug_key=None,
         dose_key=None,
         drugs_embeddings=None,
+        knockout_key=None,
+        knockouts_embeddings=None,
         covariate_keys=None,
         smiles_key=None,
         degs_key=None,
@@ -89,11 +93,11 @@ class Dataset:
         :param covariate_keys: Names of obs columns which stores covariate names (eg cell type).
         :param drug_key: Name of obs column which stores drug-perturbation name (eg drug name).
             Combinations of perturbations are separated with `+`.
+        :param knockout_key: Name of obs column which stores knockout-perturbation name (eg gene ID).
             Combinations of perturbations are separated with `+`.
         :param dose_key: Name of obs column which stores perturbation dose.
             Combinations of perturbations are separated with `+`.
-        :param pert_category: Name of obs column with stores covariate + perturbation + dose as one string.
-            Example: cell type + drug name + drug dose. This is used during evaluation.
+        :param pert_category: Name of obs column with stores covariate + (drug_perturbation + dose) + (knockout_perturbation) as one string.
         """
         logging.info(f"Starting to read in data: {data}\n...")
         if isinstance(data, AnnData):
@@ -106,6 +110,7 @@ class Dataset:
         self.var_names = data.var_names
 
         self.drug_key = drug_key
+        self.knockout_key = knockout_key
         self.dose_key = dose_key
         if isinstance(covariate_keys, str):
             covariate_keys = [covariate_keys]
@@ -181,6 +186,50 @@ class Dataset:
             self.drug_ctrl_name = None
             self.drugs_embeddings = None
 
+        if knockout_key is not None:
+            self.knockouts_names = np.array(data.obs[knockout_key].values)
+
+            # get unique gene knockouts
+            knockouts_names_unique = set()
+            for d in self.knockouts_names:
+                [knockouts_names_unique.add(i) for i in d.split("+")]
+            self.knockouts_names_unique_sorted = list(sorted(knockouts_names_unique))
+            self.num_knockouts = len(self.knockouts_names_unique_sorted)
+
+            #only allow for one unqiue name for control
+            self.knockout_ctrl_name = np.unique(data[data.obs["control"] == 1].obs[self.knockout_key])[0]
+
+            self._knockouts_name_to_idx = {
+                gene_id: idx for idx, gene_id in enumerate(self.knockouts_names_unique_sorted)
+            }
+
+            #use -1 as place holder
+            knockouts_idx = []
+            for comb in self.knockouts_names:
+                knockouts_combos = comb.split("+")
+                knockouts_combos_idx = [self._knockouts_name_to_idx[name] for name in knockouts_combos]
+                knockouts_combos_idx = torch.tensor(knockouts_combos_idx, dtype=torch.int32)
+                knockouts_idx.append(knockouts_combos_idx)
+            self.knockouts_idx = np.array(knockouts_idx, dtype=object)
+
+            if isinstance(knockouts_embeddings, torch.nn.Embedding):
+                self.knockouts_embeddings = knockouts_embeddings
+            elif isinstance(knockouts_embeddings, str):
+                knockouts_embeddings_df = pd.read_parquet(knockouts_embeddings)
+                knockouts_embeddings = torch.tensor(knockouts_embeddings_df.loc[self.knockouts_names_unique_sorted].values,
+                                                    dtype=torch.float32, device=self.device)
+                self.knockouts_embeddings = torch.nn.Embedding.from_pretrained(knockouts_embeddings, freeze=True)
+            else:
+                # maybe provided with None, create random embeddings
+                self.knockouts_embeddings = torch.nn.Embedding(self.num_knockouts, 256, _freeze=True)
+
+        else:
+            self.knockouts_names = None
+            self.knockouts_names_unique_sorted = None
+            self.num_knockouts = 0
+            self.knockouts_idx = None
+            self.knockout_ctrl_name = None
+            self.knockouts_embeddings = None
 
         if isinstance(covariate_keys, list) and covariate_keys:
             if not len(covariate_keys) == len(set(covariate_keys)):
@@ -234,6 +283,12 @@ class Dataset:
         """
         return self._drugs_name_to_idx[drug_name]
 
+    def knockout_name_to_idx(self, knockout_name: str):
+        """
+        For the given gene knockout, return it's index. The index will be persistent for each dataset (since the list is sorted).
+        Raises ValueError if the drug doesn't exist in the dataset.
+        """
+        return self._knockouts_name_to_idx[knockout_name]
 
     def __getitem__(self, i):
         return (
@@ -241,6 +296,8 @@ class Dataset:
             indx(self.drugs_idx, i),
             indx(self.dosages, i),
             indx(self.drugs_embeddings, indx(self.drugs_idx, i)),
+            indx(self.knockouts_idx, i),
+            indx(self.knockouts_embeddings, indx(self.knockouts_idx, i)),
             *[indx(cov, i) for cov in self.covariates_idx],
         )
 
@@ -257,16 +314,21 @@ class SubDataset:
     def __init__(self, dataset: Dataset, indices):
         self.drug_key = dataset.drug_key
         self.dose_key = dataset.dose_key
+        self.knockout_key = dataset.knockout_key
         self.covariate_keys = dataset.covariate_keys
         self.smiles_key = dataset.smiles_key
         self.drugs_embeddings = dataset.drugs_embeddings
+        self.knockouts_embeddings = dataset.knockouts_embeddings
 
         self.genes = dataset.genes[indices]
         self.drugs_idx = indx(dataset.drugs_idx, indices)
         self.dosages = indx(dataset.dosages, indices)
         self.covariates_idx = [indx(cov, indices) for cov in dataset.covariates_idx] if dataset.covariates_idx is not None else None
+        self.knockouts_idx = indx(dataset.knockouts_idx, indices)
+
 
         self.drugs_names = indx(dataset.drugs_names, indices)
+        self.knockouts_names = indx(dataset.knockouts_names, indices)
         self.pert_categories = indx(dataset.pert_categories, indices)
         self.covariate_names = {}
         assert (
@@ -278,10 +340,12 @@ class SubDataset:
         self.var_names = dataset.var_names
         self.de_genes = dataset.de_genes
         self.drug_ctrl_name = dataset.drug_ctrl_name
+        self.knockout_ctrl_name = dataset.knockout_ctrl_name
 
         self.num_covariates = dataset.num_covariates
         self.num_genes = dataset.num_genes
         self.num_drugs = dataset.num_drugs
+        self.num_knockouts = dataset.num_knockouts
 
 
     def __getitem__(self, i):
@@ -290,6 +354,8 @@ class SubDataset:
             indx(self.drugs_idx, i),
             indx(self.dosages, i),
             indx(self.drugs_embeddings, indx(self.drugs_idx, i)),
+            indx(self.knockouts_idx, i),
+            indx(self.knockouts_embeddings, indx(self.knockouts_idx, i)),
             *[indx(cov, i) for cov in self.covariates_idx],
         )
 
@@ -301,6 +367,7 @@ def load_dataset_splits(
     dataset_path: str,
     drug_key: Union[str, None],
     dose_key: Union[str, None],
+    knockout_key: Union[str, None],
     covariate_keys: Union[list, str, None],
     smiles_key: Union[str, None],
     degs_key=None,
@@ -308,12 +375,15 @@ def load_dataset_splits(
     split_key: str = "split",
     return_dataset: bool = False,
     drugs_embeddings = None,
+    knockouts_embeddings = None
 ):
     dataset = Dataset(
         dataset_path,
         drug_key,
         dose_key,
         drugs_embeddings,
+        knockout_key,
+        knockouts_embeddings,
         covariate_keys,
         smiles_key,
         degs_key,
