@@ -11,7 +11,6 @@ from anndata import AnnData
 from rdkit import Chem
 import lightning as L
 from torch.utils.data import DataLoader
-import omegaconf
 
 if torch.cuda.is_available():
     _device = "cuda"
@@ -22,11 +21,11 @@ else:
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
-def canonicalize_smiles(smiles: Optional[str]):
-    if smiles:
-        return Chem.CanonSmiles(smiles)
-    else:
-        return None
+#def canonicalize_smiles(smiles: Optional[str]):
+#    if smiles:
+#        return Chem.CanonSmiles(smiles)
+#    else:
+#        return None
     
 def drug_names_to_once_canon_smiles(
     drug_names: List[str], dataset: sc.AnnData, perturbation_key: str, smiles_key: str
@@ -37,13 +36,11 @@ def drug_names_to_once_canon_smiles(
     TODO: This function will need to be rewritten to handle datasets with combinations.
     This is not difficult to do, mainly we need to standardize how combinations of SMILES are stored in anndata.
     """
-    name_to_smiles_map = {
-        drug: canonicalize_smiles(smiles)
-        for drug, smiles in dataset.obs.groupby(
-            [perturbation_key, smiles_key]
-        ).groups.keys()
-    }
-    return [name_to_smiles_map.get(name) for name in drug_names]
+    
+    drugs=dataset.obs[perturbation_key]
+    smiles=dataset.obs[smiles_key]
+    name_to_smiles_map = {drugs[i]:smiles[i] for i in range(len(smiles))}
+    return [name_to_smiles_map.get(name) for name in drugs]
 
 
 def indx(a,i):
@@ -107,19 +104,16 @@ class Dataset:
         self.dose_key = dose_key
         if isinstance(covariate_keys, str):
             covariate_keys = [covariate_keys]
-        if isinstance(covariate_keys, omegaconf.listconfig.ListConfig):
-            covariate_keys = list(covariate_keys)
         self.covariate_keys = covariate_keys
         self.smiles_key = smiles_key
         if degs_key is not None:
             self.de_genes = data.uns[degs_key]
         else: self.de_genes = None
-
-        if drug_key is not None:
-            if dose_key is None:
-                raise ValueError(
-                    f"A 'dose_key' is required when provided a 'drug_key'({drug_key})."
-                )
+        
+        
+        if str(drug_key)!='none' and str(drug_key)!='None':
+            if str(dose_key)=='none' and  str(dose_key)=='None':
+                raise ValueError(f"A 'dose_key' is required when provided a 'drug_key'({drug_key}).")
             
             self.drugs_names = np.array(data.obs[drug_key].values)
             self.dose_names = np.array(data.obs[dose_key].values)
@@ -142,34 +136,34 @@ class Dataset:
             self.canon_smiles_unique_sorted = drug_names_to_once_canon_smiles(
                 list(self.drugs_names_unique_sorted), data, drug_key, smiles_key
             )
-    
 
-            drugs_idx = []
-            for comb in self.drugs_names:
+            
+            drugs_idx = np.empty(len(self.drugs_names), dtype=object)
+            for i,comb in enumerate(self.drugs_names):
                 drugs_combos = comb.split("+")
                 drugs_combos_idx = [self._drugs_name_to_idx[name] for name in drugs_combos]
-                drugs_combos_idx = torch.tensor(drugs_combos_idx, dtype=torch.int32)
-                drugs_idx.append(drugs_combos_idx)
-            self.drugs_idx = np.array(drugs_idx, dtype=object)
-
-            dosages = []
-            for comb in self.dose_names:
+                drugs_idx[i] = torch.tensor(drugs_combos_idx, dtype=torch.int32)
+            self.drugs_idx =  drugs_idx
+            
+            
+            dosages = np.empty(len(self.dose_names), dtype=object)
+            for i,comb in enumerate(self.dose_names):
+                comb = str(comb)
                 dosages_combos = comb.split("+")
                 dosages_combos = [float(i) for i in dosages_combos] 
-                dosages_combos = torch.tensor(dosages_combos, dtype=torch.float32)
-                dosages.append(dosages_combos)
-            self.dosages = np.array(dosages, dtype=object)
+                dosages[i] = torch.tensor(dosages_combos, dtype=torch.float32)
+            self.dosages = dosages
+            
             
             if isinstance(drugs_embeddings, torch.nn.Embedding):
                 self.drugs_embeddings = drugs_embeddings
             elif isinstance(drugs_embeddings, str):
-                drugs_embeddings_df = pd.read_parquet(drugs_embeddings)
-                drugs_embeddings = torch.tensor(drugs_embeddings_df.loc[self.canon_smiles_unique_sorted].values, 
-                             dtype=torch.float32)
-                self.drugs_embeddings = torch.nn.Embedding.from_pretrained(drugs_embeddings, freeze=True)
+                self.drugs_embeddings = torch.load(drugs_embeddings, map_location=torch.device('cpu'))
+                self.drugs_embeddings = {self._drugs_name_to_idx[name]: self.drugs_embeddings[name] for name in self.drugs_names_unique_sorted}
             else:
                 # maybe provided with None, create random embeddings
                 self.drugs_embeddings = torch.nn.Embedding(self.num_drugs, 256, _freeze=True)
+            self.drugs_embeddings = torch.nn.Embedding.from_pretrained(torch.stack([self.drugs_embeddings[i] for i in range(self.num_drugs)]), freeze=True)
             self.drug_embedding_dimension = self.drugs_embeddings.embedding_dim
         else:
             self.drugs_names = None
@@ -182,7 +176,7 @@ class Dataset:
             self.drugs_embeddings = None
             self.drug_embedding_dimension = None
 
-        if knockout_key is not None:
+        if str(knockout_key)!='none' and str(knockout_key)!='None':
             self.knockouts_names = np.array(data.obs[knockout_key].values)
         
             # get unique gene knockouts
@@ -200,13 +194,12 @@ class Dataset:
             }
 
             #use -1 as place holder
-            knockouts_idx = []
-            for comb in self.knockouts_names:
+            knockouts_idx = np.empty(len(self.knockouts_names), dtype=object)
+            for i,comb in enumerate(self.knockouts_names):
                 knockouts_combos = comb.split("+")
                 knockouts_combos_idx = [self._knockouts_name_to_idx[name] for name in knockouts_combos]
-                knockouts_combos_idx = torch.tensor(knockouts_combos_idx, dtype=torch.int32)
-                knockouts_idx.append(knockouts_combos_idx)
-            self.knockouts_idx = np.array(knockouts_idx, dtype=object)
+                knockouts_idx[i] = torch.tensor(knockouts_combos_idx, dtype=torch.int32)
+            self.knockouts_idx = knockouts_idx
 
             if isinstance(knockouts_embeddings, dict):
                 self.knockouts_embeddings = {self._knockouts_name_to_idx[name]: knockouts_embeddings[name] for name in self.knockouts_names_unique_sorted}
@@ -215,9 +208,9 @@ class Dataset:
                 self.knockouts_embeddings = {self._knockouts_name_to_idx[name]: self.knockouts_embeddings[name] for name in self.knockouts_names_unique_sorted}
             else:
                 # maybe provided with None, create random embeddings
+                print('Random embedding created!!!')
                 self.knockouts_embeddings = {self._knockouts_name_to_idx[name]: torch.randn(256) for name in self.knockouts_names_unique_sorted}
-            self.knockouts_embeddings = torch.nn.Embedding.from_pretrained(torch.stack([self.knockouts_embeddings[i] for i in range(self.num_knockouts)]),
-                                                                           freeze=True)
+            self.knockouts_embeddings = torch.nn.Embedding.from_pretrained(torch.stack([self.knockouts_embeddings[i] for i in range(self.num_knockouts)]),freeze=True)
             self.knockout_embedding_dimension = self.knockouts_embeddings.embedding_dim
         else:
             self.knockouts_names = None
@@ -228,8 +221,7 @@ class Dataset:
             self.knockouts_embeddings = None
             self.knockout_embedding_dimension = None
 
-        
-        if isinstance(covariate_keys, list) and len(covariate_keys)>0:
+        if isinstance(covariate_keys, list) and covariate_keys:
             if not len(covariate_keys) == len(set(covariate_keys)):
                 raise ValueError(f"Duplicate keys were given in: {covariate_keys}")
             self.covariate_names = {}
@@ -331,7 +323,6 @@ class SubDataset:
         self.knockouts_names = indx(dataset.knockouts_names, indices)
         self.pert_categories = indx(dataset.pert_categories, indices)
         self.covariate_names = {}
-    
         for cov in self.covariate_keys:
             self.covariate_names[cov] = indx(dataset.covariate_names[cov], indices)
 
@@ -366,7 +357,7 @@ def load_dataset_splits(
     drug_key: Union[str, None],
     dose_key: Union[str, None],
     knockout_key: Union[str, None],
-    covariate_keys: Union[list, str, None, omegaconf.listconfig.ListConfig],
+    covariate_keys: Union[list, str, None],
     smiles_key: Union[str, None],
     pert_category: str = "cov_geneid",
     split_key: str = "split",
@@ -406,16 +397,15 @@ def load_dataset_splits(
 
 
 def custom_collate_train(batch):
-    genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, *covs = zip(*batch)
+    genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, cov = zip(*batch)
     genes = torch.stack(genes, 0)
     drugs_idx = None if drugs_idx[0] is None else [d for d in drugs_idx]
     dosages = None if dosages[0] is None else [d for d in dosages]
     drugs_emb = None if drugs_emb[0] is None else [d for d in drugs_emb]
     knockouts_idx = None if knockouts_idx[0] is None else [d for d in knockouts_idx]
     knockouts_emb = None if knockouts_emb[0] is None else [d for d in knockouts_emb]
-    for i in range(len(covs)):
-        covs[i] = None if (covs[i][0] is None) else  torch.stack(covs[i], 0)
-    return [genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, *covs]
+    cov = None if cov[0] is None else  torch.stack(cov, 0)
+    return [genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, cov]
 
 
 def custom_collate_validate_r2(batch):
@@ -437,7 +427,7 @@ class DataModule(L.LightningDataModule):
                 drug_key: Union[str, None],
                 dose_key: Union[str, None],
                 knockout_key: Union[str, None],
-                covariate_keys: Union[list, str, None, omegaconf.listconfig.ListConfig],
+                covariate_keys: Union[list, str, None],
                 smiles_key: Union[str, None],
                 pert_category: str = "cov_geneid",
                 split_key: str = "split",
@@ -498,7 +488,6 @@ class DataModule(L.LightningDataModule):
                             collate_fn = custom_collate_validate_r2,
                             shuffle=False
                             )
-    
     def test_dataloader(self):
         return DataLoader(
                         [self.datasets],
@@ -506,4 +495,3 @@ class DataModule(L.LightningDataModule):
                         collate_fn = custom_collate_full_evaluation,
                         shuffle=False
                         )
-    

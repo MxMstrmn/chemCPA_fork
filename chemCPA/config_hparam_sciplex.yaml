@@ -1,0 +1,81 @@
+#profiling:
+  #run_profiler: false
+  #outdir: /Users/zkm/Desktop/chemCPA_fork/chemCPA/train_data
+
+
+dataset:
+  dataset_type: Sciplex
+  data_params:
+    dataset_path: /home/manu/chemCPA/chemCPA/Sciplex_pp_sub.h5ad # full path to the anndata dataset
+    drug_key: treatment
+    dose_key: treatment_dose_uM
+    knockout_key: null
+    covariate_keys: 
+      - cell_line
+    smiles_key: SMILES
+    pert_category: pert_category
+    split_key: split
+    degs_key: rank_genes_groups_cov
+    drugs_embeddings: rdkit2D_embedding.parquet
+    knockouts_embeddings: /home/manu/chemCPA/test/fake_d.pt
+    return_dataset: true
+
+model:
+  pretrained_model_path: null
+  load_pretrained: false
+  append_ae_layer: false  
+  pretrained_model_hashes: null
+  additional_params:
+    seed: 0
+    doser_type: logsigm
+    knockout_effect_type: original
+    decoder_activation: linear 
+  hparams:
+    dim: 128
+    dosers_width: 64
+    dosers_depth: 1
+    dosers_lr: 0.0005
+    dosers_wd: 0.0000001
+    knockout_effects_width: 64
+    knockout_effects_depth: 1
+    knockout_effects_lr: 0.0005
+    knockout_effects_wd: 0.0000001
+    autoencoder_width: 512
+    autoencoder_depth: 4
+    adversary_width: 128
+    adversary_depth: 3
+    reg_adversary_drug: 5
+    reg_adversary_knockout: 5
+    reg_adversary_cov: 5
+    penalty_adversary: 3
+    basal_state_added_noise_std: 0.1
+    basal_state_regularization: 10.0
+    train_adversarial: True
+    autoencoder_lr: 0.001
+    adversary_lr: 0.0003
+    autoencoder_wd: 0.0000003
+    adversary_wd: 0.000004
+    adversary_steps: 2
+    batch_size: 128
+    step_size_lr: 100
+    embedding_encoder_width: 512
+    embedding_encoder_depth: 3
+  training_hparams:
+    checkpoint_freq: 15 # checkpoint frequency to run evaluate, and maybe save checkpoint
+    num_epochs: 100 # maximum epochs for training. 
+    max_time: 00:20:00:00 # maximum computation time
+    patience: 4 
+    full_eval_during_train: false
+    run_eval_disentangle: false # whether to calc the disentanglement loss when running the full eval
+    save_checkpoints: true
+    save_dir: /home/manu/chemCPA/test
+    run_eval_r2: true
+    run_eval_r2_sc: false
+    run_eval_logfold: false
+  test_hparams:
+    run_eval_disentangle: false # whether to calc the disentanglement loss when running the full eval
+    run_eval_r2: true 
+    run_eval_r2_sc: true
+    run_eval_logfold: true
+    
+    
