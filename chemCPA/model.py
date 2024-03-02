@@ -593,10 +593,9 @@ class ComPert(L.LightningModule):
         latent_basal = self.encoder(genes)
         if not self.train_adversarial:
             device=self.device
-            latent_basal = latent_basal + torch.randn(latent_basal.shape).to(device)*self.basal_state_added_noise_std
-        
-
-        latent_treated = latent_basal
+            latent_treated = latent_basal + torch.randn(latent_basal.shape).to(device)*self.basal_state_added_noise_std
+        else:
+            latent_treated = latent_basal
         
         if self.num_drugs > 0:
             drug_embedding = self.compute_drug_and_knockout_embeddings_(drugs_idx, dosages, drugs_embeddings, doser_type=self.doser_type, dosers=self.dosers, encoder=self.drug_embedding_encoder)
