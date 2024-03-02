@@ -485,36 +485,41 @@ def evaluate_disentanglement(autoencoder, data: data.Dataset):
                 covariates_idx=_move_inputs(data.covariates_idx)[0],
                 return_latent_basal=True,
             )
-        
-    if not self.train_adversarial:
-        latent_basal = latent_basal + torch.randn(latent_basal.shape).to(self.device)*self.basal_state_added_noise_std
-
-    mean = latent_basal.mean(dim=0, keepdim=True)
-    stddev = latent_basal.std(0, unbiased=False, keepdim=True)
-    normalized_basal = (latent_basal - mean) / stddev
+            
+            
     criterion = nn.CrossEntropyLoss()
 
-    def compute_score(labels):
+    def compute_score(autoencoder, latent_basal, dataset, labels):
         unique_labels = set(labels)
         label_to_idx = {labels: idx for idx, labels in enumerate(unique_labels)}
         labels_tensor = torch.tensor(
             [label_to_idx[label] for label in labels], dtype=torch.long, device=_device
         )
-        assert normalized_basal.size(0) == len(labels_tensor)
-        dataset = torch.utils.data.TensorDataset(normalized_basal, labels_tensor)
-        data_loader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=True)
 
         # 2 non-linear layers of size <input_dimension>
         # followed by a linear layer.
         disentanglement_classifier = MLP(
-            [normalized_basal.size(1)]
-            + [normalized_basal.size(1) for _ in range(2)]
+            [latent_basal.size(1)]
+            + [latent_basal.size(1) for _ in range(2)]
             + [len(unique_labels)]
         ).to(_device)
         optimizer = torch.optim.Adam(disentanglement_classifier.parameters(), lr=1e-2)
         
         with torch.set_grad_enabled(True):
             for epoch in range(400):
+                if not autoencoder.train_adversarial:
+                    latent_basal0 = latent_basal + torch.randn(latent_basal.shape).to(autoencoder.device)*autoencoder.basal_state_added_noise_std
+
+
+                mean = latent_basal0.mean(dim=0, keepdim=True)
+                stddev = latent_basal0.std(0, unbiased=False, keepdim=True)
+                normalized_basal = (latent_basal0 - mean) / stddev
+                assert normalized_basal.size(0) == len(labels_tensor)
+                dataset = torch.utils.data.TensorDataset(normalized_basal, labels_tensor)
+                data_loader = torch.utils.data.DataLoader(dataset, batch_size=100000, shuffle=True)
+        
+        
+        
                 for X, y in data_loader:
                     pred = disentanglement_classifier(X)
                     loss = criterion(pred, y)
@@ -529,11 +534,11 @@ def evaluate_disentanglement(autoencoder, data: data.Dataset):
 
     total_scores = []
     if data.drug_key is not None:
-        drug_score = compute_score(data.drugs_names)
+        drug_score = compute_score(autoencoder, latent_basal, data, data.drugs_names)
         total_scores.append(drug_score)
     else: total_scores.append(None)
     if str(data.knockout_key)!='none' and str(data.knockout_key)!='None':
-        knockout_score = compute_score(data.knockouts_names)
+        knockout_score = compute_score(autoencoder, latent_basal, data, data.knockouts_names)
         total_scores.append(knockout_score)
     else: total_scores.append(None)
     if data.covariate_keys is not None: 
@@ -542,7 +547,7 @@ def evaluate_disentanglement(autoencoder, data: data.Dataset):
             if len(np.unique(data.covariate_names[cov])) == 0:
                 continue
             else:
-                covariate_score.append(compute_score(data.covariate_names[cov]))
+                covariate_score.append(compute_score(autoencoder, latent_basal, data, data.covariate_names[cov]))
         total_scores.append(covariate_score)
     else: total_scores.append(None)
 
