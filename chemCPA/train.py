@@ -485,7 +485,9 @@ def evaluate_disentanglement(autoencoder, data: data.Dataset):
                 covariates_idx=_move_inputs(data.covariates_idx)[0],
                 return_latent_basal=True,
             )
-    
+        
+    if not self.train_adversarial:
+        latent_basal = latent_basal + torch.randn(latent_basal.shape).to(self.device)*self.basal_state_added_noise_std
 
     mean = latent_basal.mean(dim=0, keepdim=True)
     stddev = latent_basal.std(0, unbiased=False, keepdim=True)
