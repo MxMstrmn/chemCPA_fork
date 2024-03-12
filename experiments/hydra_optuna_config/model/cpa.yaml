@@ -1,0 +1,11 @@
+model_type: CPA
+pretrained_model_path: null
+save_dir: /Users/zkm/Desktop/chemCPA_fork/chemCPA/sweep_data
+load_pretrained: false
+append_ae_layer: false  
+pretrained_model_hashes: null
+additional_params:
+  seed: 1337
+  doser_type: logsigm
+  knockout_effect_type: original
+  decoder_activation: linear 

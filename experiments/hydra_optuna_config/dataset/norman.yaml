@@ -1,0 +1,15 @@
+dataset_type: Norman
+data_params:
+  dataset_path: /Users/zkm/Desktop/chemCPA_fork/chemCPA/train_data/Norman_pp.h5ad # full path to the anndata dataset
+  drug_key: null
+  dose_key: null
+  knockout_key: treatment
+  covariate_keys: 
+    - cell_line
+  smiles_key: null
+  pert_category: pert_category
+  split_key: split
+  degs_key: rank_genes_groups_cov
+  drugs_embeddings: null
+  knockouts_embeddings: /Users/zkm/Desktop/chemCPA_fork/chemCPA/train_data/gene_name_mapped_embedding.pt
+  return_dataset: true

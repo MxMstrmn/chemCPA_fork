@@ -11,6 +11,7 @@ from anndata import AnnData
 from rdkit import Chem
 import lightning as L
 from torch.utils.data import DataLoader
+import omegaconf
 
 if torch.cuda.is_available():
     _device = "cuda"
@@ -106,6 +107,8 @@ class Dataset:
         self.dose_key = dose_key
         if isinstance(covariate_keys, str):
             covariate_keys = [covariate_keys]
+        if isinstance(covariate_keys, omegaconf.listconfig.ListConfig):
+            covariate_keys = list(covariate_keys)
         self.covariate_keys = covariate_keys
         self.smiles_key = smiles_key
         if degs_key is not None:
@@ -225,7 +228,8 @@ class Dataset:
             self.knockouts_embeddings = None
             self.knockout_embedding_dimension = None
 
-        if isinstance(covariate_keys, list) and covariate_keys:
+        
+        if isinstance(covariate_keys, list) and len(covariate_keys)>0:
             if not len(covariate_keys) == len(set(covariate_keys)):
                 raise ValueError(f"Duplicate keys were given in: {covariate_keys}")
             self.covariate_names = {}
@@ -334,6 +338,7 @@ class SubDataset:
         self.knockouts_names = indx(dataset.knockouts_names, indices)
         self.pert_categories = indx(dataset.pert_categories, indices)
         self.covariate_names = {}
+    
         for cov in self.covariate_keys:
             self.covariate_names[cov] = indx(dataset.covariate_names[cov], indices)
 
@@ -368,7 +373,7 @@ def load_dataset_splits(
     drug_key: Union[str, None],
     dose_key: Union[str, None],
     knockout_key: Union[str, None],
-    covariate_keys: Union[list, str, None],
+    covariate_keys: Union[list, str, None, omegaconf.listconfig.ListConfig],
     smiles_key: Union[str, None],
     pert_category: str = "cov_geneid",
     split_key: str = "split",
@@ -408,15 +413,16 @@ def load_dataset_splits(
 
 
 def custom_collate_train(batch):
-    genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, cov = zip(*batch)
+    genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, *covs = zip(*batch)
     genes = torch.stack(genes, 0)
     drugs_idx = None if drugs_idx[0] is None else [d for d in drugs_idx]
     dosages = None if dosages[0] is None else [d for d in dosages]
     drugs_emb = None if drugs_emb[0] is None else [d for d in drugs_emb]
     knockouts_idx = None if knockouts_idx[0] is None else [d for d in knockouts_idx]
     knockouts_emb = None if knockouts_emb[0] is None else [d for d in knockouts_emb]
-    cov = None if cov[0] is None else  torch.stack(cov, 0)
-    return [genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, cov]
+    for i in range(len(covs)):
+        covs[i] = None if (covs[i][0] is None) else  torch.stack(covs[i], 0)
+    return [genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, *covs]
 
 
 def custom_collate_validate_r2(batch):
@@ -438,7 +444,7 @@ class DataModule(L.LightningDataModule):
                 drug_key: Union[str, None],
                 dose_key: Union[str, None],
                 knockout_key: Union[str, None],
-                covariate_keys: Union[list, str, None],
+                covariate_keys: Union[list, str, None, omegaconf.listconfig.ListConfig],
                 smiles_key: Union[str, None],
                 pert_category: str = "cov_geneid",
                 split_key: str = "split",
@@ -499,6 +505,7 @@ class DataModule(L.LightningDataModule):
                             collate_fn = custom_collate_validate_r2,
                             shuffle=False
                             )
+    
     def test_dataloader(self):
         return DataLoader(
                         [self.datasets],
@@ -506,3 +513,4 @@ class DataModule(L.LightningDataModule):
                         collate_fn = custom_collate_full_evaluation,
                         shuffle=False
                         )
+    

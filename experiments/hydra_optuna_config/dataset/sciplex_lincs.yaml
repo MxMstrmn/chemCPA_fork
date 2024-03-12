@@ -1,0 +1,15 @@
+dataset_type: Sciplex_Lincs
+data_params:
+  dataset_path: /Users/zkm/Desktop/chemCPA_fork/chemCPA/train_data/sciplex_complete_middle_subset_lincs_genes.h5ad # full path to the anndata dataset
+  drug_key: condition
+  dose_key: dose
+  knockout_key: null
+  covariate_keys: 
+    - cell_type
+    - pathway_level_1
+  smiles_key: SMILES
+  pert_category: cov_drug_dose_name
+  split_key: split_random
+  degs_key: rank_genes_groups_cov
+  drugs_embeddings: /Users/zkm/Desktop/chemCPA_fork/chemCPA/train_data/rdkit2D_embedding_lincs_trapnell.parquet
+  knockouts_embeddings: null

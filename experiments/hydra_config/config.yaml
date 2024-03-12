@@ -1,0 +1,8 @@
+defaults:
+  - dataset: norman
+  - model: cpa
+  - test: test
+  - train: train
+  - override hydra/job_logging: colorlog
+  - override hydra/hydra_logging: colorlog
+  

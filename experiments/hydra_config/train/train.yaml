@@ -1,0 +1,10 @@
+checkpoint_freq: 15 # checkpoint frequency to run evaluate, and maybe save checkpoint
+num_epochs: 100 # maximum epochs for training. One epoch updates either autoencoder, or adversary, depending on adversary_steps.
+max_time: 00:20:00:00 # maximum computation time
+patience: 4 
+full_eval_during_train: false
+run_eval_disentangle: false # whether to calc the disentanglement loss when running the full eval
+save_checkpoints: true
+run_eval_r2: true
+run_eval_r2_sc: false
+run_eval_logfold: false

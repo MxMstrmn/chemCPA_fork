@@ -159,7 +159,7 @@ class CELoss(torch.nn.Module):
         preds = softmax(preds)
 
         batch_size = len(targets)
-        preds = [preds[j,:][targets[j]] for j in range(batch_size)]
+        preds = [preds[j,:][targets[j].long()] for j in range(batch_size)]
         loss = torch.tensor([-torch.log(pred).sum() for pred in preds])
         return (loss.sum() / batch_size)
 
@@ -291,8 +291,8 @@ class ComPert(L.LightningModule):
         num_knockouts: int,
         num_covariates: list,
         hparams,
-        training_hparams,
-        test_hparams,
+        training_params,
+        test_params,
         seed=0,
         doser_type="logsigm",
         knockout_effect_type="original",
@@ -637,6 +637,12 @@ class ComPert(L.LightningModule):
         """
         assert (drugs_idx is not None and dosages is not None)
 
+        stacked_idx = []
+        for i, dosage in enumerate(dosages):
+            if i==0:
+                stacked_idx.append(len(dosage))
+            else:
+                stacked_idx.append(len(dosage) + stacked_idx[-1])
         
         scaled_dosages = []
         if self.doser_type == "mlp":
@@ -655,12 +661,6 @@ class ComPert(L.LightningModule):
                            dosage, embedding in zip(dosages, drugs_embeddings)]
             total_stack = torch.cat(total_stack, dim=0)
             stacked_dosages = self.dosers(total_stack)
-            stacked_idx = []
-            for i, dosage in enumerate(dosages):
-                if i==0:
-                    stacked_idx.append(len(dosage))
-                else:
-                    stacked_idx.append(len(dosage) + stacked_idx[-1])
             for i in range(len(dosages)):
                 if i == 0:
                     scaled_dosages.append(stacked_dosages[0:stacked_idx[0]].view(-1))
@@ -674,8 +674,14 @@ class ComPert(L.LightningModule):
 
         
         # Transform and adjust dimension to latent dims
-        latent_drugs = [self.drug_embedding_encoder(i) for i in drugs_embeddings]
-        
+        # need to concatenate input since the embedding encoder performs batch norm
+        latent_stacked = self.drug_embedding_encoder(torch.concat(drugs_embeddings, dim=0))
+        latent_drugs = []
+        for i in range(len(drugs_embeddings)):
+            if i == 0:
+                latent_drugs.append(latent_stacked[0: stacked_idx[0]])
+            else:
+                latent_drugs.append(latent_stacked[stacked_idx[i-1]:stacked_idx[i]])
         latent_drugs = [torch.einsum("b,bd->bd", [scaled_dosage, latent_drug]) for 
                         scaled_dosage, latent_drug in zip(scaled_dosages, latent_drugs)]
         return torch.stack([latent_drug.sum(dim=0) for latent_drug in latent_drugs])
@@ -694,6 +700,12 @@ class ComPert(L.LightningModule):
         """
         
         effects = [torch.ones_like(idx, dtype=torch.float32) for idx in knockouts_idx]
+        stacked_idx = []
+        for i, effect in enumerate(effects):
+            if i==0:
+                stacked_idx.append(len(effect))
+            else:
+                stacked_idx.append(len(effect) + stacked_idx[-1])
         scaled_effects = []
         if self.knockout_effect_type == "mlp":
             for idx, effect in zip(knockouts_idx, effects):
@@ -710,12 +722,6 @@ class ComPert(L.LightningModule):
             
             total_stack = torch.cat(total_stack, dim=0)
             stacked_effects = self.knockout_effects(total_stack)
-            stacked_idx = []
-            for i, effect in enumerate(effects):
-                if i==0:
-                    stacked_idx.append(len(effect))
-                else:
-                    stacked_idx.append(len(effect) + stacked_idx[-1])
             for i in range(len(effects)):
                 if i == 0:
                     scaled_effects.append(stacked_effects[0:stacked_idx[0]].view(-1))
@@ -730,7 +736,14 @@ class ComPert(L.LightningModule):
 
         
         # Transform and adjust dimension to latent dims
-        latent_knockouts = [self.knockout_embedding_encoder(i) for i in knockouts_embeddings]
+        # need to concatenate input since the embedding encoder performs batch norm
+        latent_stacked = self.knockout_embedding_encoder(torch.concat(knockouts_embeddings, dim=0))
+        latent_knockouts = []
+        for i in range(len(knockouts_embeddings)):
+            if i == 0:
+                latent_knockouts.append(latent_stacked[0: stacked_idx[0]])
+            else:
+                latent_knockouts.append(latent_stacked[stacked_idx[i-1]:stacked_idx[i]])
         latent_knockouts = [torch.einsum("b,bd->bd", [scaled_effect, latent_knockout]) for 
                             scaled_effect, latent_knockout in zip(scaled_effects, latent_knockouts)]
         return torch.stack([latent_knockout.sum(dim=0) for latent_knockout in latent_knockouts])
@@ -899,7 +912,9 @@ class ComPert(L.LightningModule):
                                 reconstruction_loss
                                 - self.hparams.hparams['reg_adversary_drug'] * adversary_drugs_loss
                                 - self.hparams.hparams['reg_adversary_knockout'] * adversary_knockouts_loss
-                                - self.hparams.hparams['reg_adversary_cov'] * adversary_covariates_loss
+                                - self.hparams.hparams['reg_adversary_cov'] * adversary_covariates_loss * (self.num_covariates != [1])
+                                #turn off the covariate loss if only 1 cell line
+                                #the implementation may be different when there are multiple covariates
             )
             optimizer_autoencoder.step()
             if (self.num_drugs > 0) and (self.doser_type != "original"):
@@ -931,7 +946,7 @@ class ComPert(L.LightningModule):
         
 
     def validation_step(self, batch, batch_idx):
-        if not self.hparams.training_hparams['full_eval_during_train']:
+        if not self.hparams.training_params['full_eval_during_train']:
             logging.info(f"Running accuracy evaluation (Epoch:{self.current_epoch})")
             dataset_test_treated, dataset_test_control_genes = batch
             evaluation_r2_scores = evaluate_r2(
@@ -939,21 +954,23 @@ class ComPert(L.LightningModule):
                     dataset_test_treated,
                     dataset_test_control_genes,
                 )
+            """
             evaluation_r2_sc_scores = evaluate_r2_sc(
                  self,
                  dataset_test_treated
                 )
+            """
             self.log_dict({
                 'mean_r2_score': evaluation_r2_scores[0],
                 'mean_r2_score_de': evaluation_r2_scores[1],
                 'var_score': evaluation_r2_scores[2],
                 'var_score_de': evaluation_r2_scores[3],
                 'average_r2_score': np.mean(evaluation_r2_scores),
-                'mean_r2_sc_score': evaluation_r2_sc_scores[0],
-                'mean_r2_sc_score_de': evaluation_r2_sc_scores[1],
-                'var_sc_score': evaluation_r2_sc_scores[2],
-                'var_sc_score_de': evaluation_r2_sc_scores[3],
-                'average_r2_sc_score': np.mean(evaluation_r2_sc_scores)
+                #'mean_r2_sc_score': evaluation_r2_sc_scores[0],
+                #'mean_r2_sc_score_de': evaluation_r2_sc_scores[1],
+                #'var_sc_score': evaluation_r2_sc_scores[2],
+                #'var_sc_score_de': evaluation_r2_sc_scores[3],
+                #'average_r2_sc_score': np.mean(evaluation_r2_sc_scores)
             }, batch_size=1)
         else:
             logging.info(f"Running the full evaluation (Epoch:{self.current_epoch})")
@@ -961,13 +978,13 @@ class ComPert(L.LightningModule):
             evaluation_stats = evaluate(
                                         self,
                                         datasets,
-                                        run_disentangle=self.hparams.training_hparams['run_eval_disentangle'],
-                                        run_r2=self.hparams.training_hparams['run_eval_r2'],
-                                        run_r2_sc=self.hparams.training_hparams['run_eval_r2_sc'],
-                                        run_logfold=self.hparams.training_hparams['run_eval_logfold'],
+                                        run_disentangle=self.hparams.training_params['run_eval_disentangle'],
+                                        run_r2=self.hparams.training_params['run_eval_r2'],
+                                        run_r2_sc=self.hparams.training_params['run_eval_r2_sc'],
+                                        run_logfold=self.hparams.training_params['run_eval_logfold'],
                         )
             self.log_dict(evaluation_stats, batch_size=1)
-            if self.hparams.test_hparams['run_eval_r2']:
+            if self.hparams.training_params['run_eval_r2']:
                 self.log('average_r2_score', 
                         np.mean([evaluation_stats['test_mean_score'],
                         evaluation_stats['test_mean_score_de'],
@@ -1007,13 +1024,13 @@ class ComPert(L.LightningModule):
         evaluation_stats = evaluate(
                                     self,
                                     datasets,
-                                    run_disentangle=self.hparams.test_hparams['run_eval_disentangle'],
-                                    run_r2=self.hparams.test_hparams['run_eval_r2'],
-                                    run_r2_sc=self.hparams.test_hparams['run_eval_r2_sc'],
-                                    run_logfold=self.hparams.test_hparams['run_eval_logfold'],
+                                    run_disentangle=self.hparams.test_params['run_eval_disentangle'],
+                                    run_r2=self.hparams.test_params['run_eval_r2'],
+                                    run_r2_sc=self.hparams.test_params['run_eval_r2_sc'],
+                                    run_logfold=self.hparams.test_params['run_eval_logfold'],
                     )
         self.log_dict(evaluation_stats, batch_size=1)
-        if self.hparams.test_hparams['run_eval_r2']:
+        if self.hparams.test_params['run_eval_r2']:
             self.log('average_r2_score', 
                     np.mean([evaluation_stats['test_mean_score'],
                                                     evaluation_stats['test_mean_score_de'],
@@ -1021,9 +1038,6 @@ class ComPert(L.LightningModule):
                                                     evaluation_stats['test_var_score_de']]),
                     batch_size=1)
         
-
-
-
 
     @classmethod
     def defaults(self):
