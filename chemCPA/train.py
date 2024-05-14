@@ -48,6 +48,36 @@ def mean(x: list):
     """
     return np.mean(x) if len(x) else -1
 
+def filter_out_bad_conditions(category_count, cell_pert_comb):
+    if category_count <= 5:
+        return('continue')
+    
+    cpcl=cell_pert_comb.lower()
+    if  ("dmso" in cpcl or "control" in cpcl or "ctrl" in cpcl):
+        return('continue')
+    
+    return('')
+    
+def set_up_covariates(dataset, idx_treated, n_idx_ctrl):
+    
+        covs = None
+        if dataset.covariates_idx is not None: 
+            covs = [cov_idx[idx_treated].repeat(n_idx_ctrl) for cov_idx in dataset.covariates_idx]
+            
+        drugs = None
+        if dataset.drugs_idx is not None:
+            
+            drugs = ([dataset.drugs_idx[idx_treated]] * n_idx_ctrl,
+                [dataset.dosages[idx_treated]] * n_idx_ctrl,
+                [dataset.drugs_embeddings(dataset.drugs_idx[idx_treated])] * n_idx_ctrl)
+            
+        knockouts = None
+        if dataset.knockouts_idx is not None:
+            knockouts = ([dataset.knockouts_idx[idx_treated]] * n_idx_ctrl,
+                [dataset.knockouts_embeddings(dataset.knockouts_idx[idx_treated])] * n_idx_ctrl)
+
+        return(covs, drugs, knockouts)
+
 
 class MLP(L.LightningModule):
     """
@@ -167,19 +197,9 @@ def evaluate_logfold_r2(
     cov_type = ds_treated.covariate_keys[0]
     treated_pert_cat_index = pd.Index(ds_treated.pert_categories, dtype="category")
     ctrl_cov_cat_index = pd.Index(ds_ctrl.covariate_names[cov_type], dtype="category")
-    for cell_pert_comb, category_count in zip(
-        *np.unique(ds_treated.pert_categories, return_counts=True)
-    ):
-        # estimate metrics only for reasonably-sized drug/cell-type combos
-        if category_count <= 5:
-            continue
-
-        # doesn't make sense to evaluate DMSO (=control) as a perturbation
-        if (
-            "dmso" in cell_pert_comb.lower()
-            or "control" in cell_pert_comb.lower()
-            or "ctrl" in cell_pert_comb.lower()
-        ):
+    for cell_pert_comb, category_count in zip(*np.unique(ds_treated.pert_categories, return_counts=True)):
+        
+        if filter_out_bad_conditions(category_count, cell_pert_comb)=='continue':
             continue
 
         covariate = cell_pert_comb.split("_")[0]
@@ -207,22 +227,7 @@ def evaluate_logfold_r2(
             )
             continue
         
-        if ds_treated.covariates_idx is not None:
-            covs = [cov_idx[idx_treated].repeat(n_idx_ctrl) for cov_idx in ds_treated.covariates_idx]
-        else: covs = None
-        if ds_treated.drugs_idx is not None:
-            drugs = (
-                [ds_treated.drugs_idx[idx_treated]] * n_idx_ctrl,
-                [ds_treated.dosages[idx_treated]] * n_idx_ctrl,
-                [ds_treated.drugs_embeddings(ds_treated.drugs_idx[idx_treated])] * n_idx_ctrl
-            )
-        else: drugs = None
-        if ds_treated.knockouts_idx is not None:
-            knockouts = (
-                [ds_treated.knockouts_idx[idx_treated]] * n_idx_ctrl,
-                [ds_treated.knockouts_embeddings(ds_treated.knockouts_idx[idx_treated])] * n_idx_ctrl
-            )
-        else: knockouts = None
+        covs, drugs, knockouts = set_up_covariates(ds_treated, idx_treated, n_idx_ctrl)
         
         # Could try moving the whole genes tensor to GPU once for further speedups (but more memory problems)
         genes_ctrl = ds_ctrl.genes[idx_ctrl_all].to(device=_device)
@@ -242,6 +247,8 @@ def evaluate_logfold_r2(
 
         eps = 1e-5
         #what if y_pred is negative??
+        y_pred = F.relu(y_pred)
+
         pred = torch.log2((y_pred + eps) / (y_ctrl + eps))
         true = torch.log2((y_true + eps) / (y_ctrl + eps))
         r2 = compute_r2(true, pred)
@@ -256,7 +263,7 @@ def evaluate_logfold_r2(
         return [logfold_score, signs_score]
 
 
-def evaluate_disentanglement(autoencoder, data: chemCPA.data.Dataset):
+def evaluate_disentanglement(autoencoder, data):
     """
     Given a ComPert model, this function measures the correlation between
     its latent space and 1) a dataset's drug vectors (if any) 2) a dataset's
@@ -286,7 +293,6 @@ def evaluate_disentanglement(autoencoder, data: chemCPA.data.Dataset):
                 return_latent_basal=True,
             )
     
-
 
     mean = latent_basal.mean(dim=0, keepdim=True)
     stddev = latent_basal.std(0, unbiased=False, keepdim=True)
@@ -331,7 +337,7 @@ def evaluate_disentanglement(autoencoder, data: chemCPA.data.Dataset):
         drug_score = compute_score(data.drugs_names)
         total_scores.append(drug_score)
     else: total_scores.append(None)
-    if data.knockout_key is not None:
+    if str(data.knockout_key)!='none' and str(data.knockout_key)!='None':
         knockout_score = compute_score(data.knockouts_names)
         total_scores.append(knockout_score)
     else: total_scores.append(None)
@@ -346,6 +352,7 @@ def evaluate_disentanglement(autoencoder, data: chemCPA.data.Dataset):
     else: total_scores.append(None)
 
     return total_scores
+
 
 
 def evaluate_r2(autoencoder, dataset: SubDataset, genes_control: torch.Tensor, return_mean: bool = True):
@@ -370,17 +377,7 @@ def evaluate_r2(autoencoder, dataset: SubDataset, genes_control: torch.Tensor, r
     ):
         if (dataset.drug_key is None) and (dataset.knockout_key is None):
             break
-
-        # estimate metrics only for reasonably-sized drug/cell-type combos
-        if category_count <= 5:
-            continue
-
-        # doesn't make sense to evaluate control as a perturbation
-        if (
-            "dmso" in cell_pert_comb.lower()
-            or "control" in cell_pert_comb.lower()
-            or "ctrl" in cell_pert_comb.lower()
-        ):
+        if filter_out_bad_conditions(category_count, cell_pert_comb)=='continue':
             continue
 
         # dataset.var_names is the list of gene names
@@ -399,22 +396,9 @@ def evaluate_r2(autoencoder, dataset: SubDataset, genes_control: torch.Tensor, r
         idx_all = bool2idx(bool_category)
         idx = idx_all[0]
 
-        if dataset.covariates_idx is not None: 
-            covs = [cov_idx[idx].repeat(n_rows) for cov_idx in dataset.covariates_idx]
-        else: covs = None
-        if dataset.drugs_idx is not None:
-            drugs = (
-                [dataset.drugs_idx[idx]] * n_rows,
-                [dataset.dosages[idx]] * n_rows,
-                [dataset.drugs_embeddings(dataset.drugs_idx[idx])] * n_rows
-            )
-        else: drugs = None
-        if dataset.knockouts_idx is not None:
-            knockouts = (
-                [dataset.knockouts_idx[idx]] * n_rows,
-                [dataset.knockouts_embeddings(dataset.knockouts_idx[idx])] * n_rows
-            )
-        else: knockouts = None
+
+        covs, drugs, knockouts = set_up_covariates(dataset, idx, n_rows)
+
 
         mean_pred, var_pred = compute_prediction(
             autoencoder,
@@ -482,16 +466,7 @@ def evaluate_r2_sc(autoencoder, dataset: SubDataset, return_mean: bool = True):
         if (dataset.drug_key is None) and (dataset.knockout_key is None):
             break
 
-        # estimate metrics only for reasonably-sized drug/cell-type combos
-        if category_count <= 5:
-            continue
-
-        # doesn't make sense to evaluate control as a perturbation
-        if (
-            "dmso" in cell_pert_comb.lower()
-            or "control" in cell_pert_comb.lower()
-            or "ctrl" in cell_pert_comb.lower()
-        ):
+        if filter_out_bad_conditions(category_count, cell_pert_comb)=='continue':
             continue
 
         # dataset.var_names is the list of gene names
@@ -512,22 +487,7 @@ def evaluate_r2_sc(autoencoder, dataset: SubDataset, return_mean: bool = True):
         y_true = dataset.genes[idx_all, :].to(device=_device)
         n_obs = y_true.size(0)
 
-        if dataset.covariates_idx is not None:
-            covs = [cov_idx[idx].repeat(n_obs) for cov_idx in dataset.covariates_idx]
-        else: covs = None
-        if dataset.drugs_idx is not None:
-            drugs = (
-                [dataset.drugs_idx[idx]] * n_obs,
-                [dataset.dosages[idx]] * n_obs,
-                [dataset.drugs_embeddings(dataset.drugs_idx[idx])] * n_obs
-            )
-        else: drugs = None
-        if dataset.knockouts_idx is not None:
-            knockouts = (
-                [dataset.knockouts_idx[idx]] * n_obs,
-                [dataset.knockouts_embeddings(dataset.knockouts_idx[idx])] * n_obs
-            )
-        else: knockouts = None
+        covs, drugs, knockouts = set_up_covariates(dataset, idx, n_obs)
 
         # copies just the needed genes to GPU
         # Could try moving the whole genes tensor to GPU once for further speedups (but more memory problems)
@@ -710,5 +670,6 @@ def evaluate(
     ellapsed_minutes = (time.time() - start_time) / 60
     logging.info(f"\nTook {ellapsed_minutes:.1f} min for evaluation of accuracy.\n")
     return evaluation_stats
+
 
 

@@ -33,6 +33,7 @@ def drug_names_to_once_canon_smiles(
 ):
     """
     Converts a list of drug names to a list of SMILES. The ordering is of the list is preserved.
+    
 
     TODO: This function will need to be rewritten to handle datasets with combinations.
     This is not difficult to do, mainly we need to standardize how combinations of SMILES are stored in anndata.
@@ -47,7 +48,7 @@ def drug_names_to_once_canon_smiles(
 
 
 def indx(a,i):
-    if isinstance(a, torch.nn.Embedding) and isinstance(i, torch.Tensor):
+    if isinstance(a, torch.nn.Embedding):
         return a(i)
     elif a is not None:
         return a[i]
@@ -142,6 +143,7 @@ class Dataset:
             self.canon_smiles_unique_sorted = drug_names_to_once_canon_smiles(
                 list(self.drugs_names_unique_sorted), data, drug_key, smiles_key
             )
+            
     
 
             drugs_idx = []
@@ -150,15 +152,22 @@ class Dataset:
                 drugs_combos_idx = [self._drugs_name_to_idx[name] for name in drugs_combos]
                 drugs_combos_idx = torch.tensor(drugs_combos_idx, dtype=torch.int32)
                 drugs_idx.append(drugs_combos_idx)
-            self.drugs_idx = np.array(drugs_idx, dtype=object)
+            self.drugs_idx = np.empty(len(drugs_idx), dtype=object)
+            for i, idx in enumerate(drugs_idx):
+                self.drugs_idx[i] = idx 
 
             dosages = []
             for comb in self.dose_names:
-                dosages_combos = comb.split("+")
-                dosages_combos = [float(i) for i in dosages_combos] 
+                if isinstance(comb, str):
+                    dosages_combos = comb.split("+")
+                    dosages_combos = [float(i) for i in dosages_combos]
+                else:
+                    dosages_combos = [float(comb)]
                 dosages_combos = torch.tensor(dosages_combos, dtype=torch.float32)
                 dosages.append(dosages_combos)
-            self.dosages = np.array(dosages, dtype=object)
+            self.dosages = np.empty(len(dosages), dtype=object)
+            for i, dosage in enumerate(dosages):
+                self.dosages[i] = dosage 
             
             if isinstance(drugs_embeddings, torch.nn.Embedding):
                 self.drugs_embeddings = drugs_embeddings
@@ -253,6 +262,7 @@ class Dataset:
             self.covariate_names_unique = None
             self.covariates_idx = None
             self.num_covariates = [0]
+
 
         if pert_category is not None:
             self.pert_categories = np.array(data.obs[pert_category].values)
@@ -358,7 +368,7 @@ class SubDataset:
             self.genes[i],
             indx(self.drugs_idx, i),
             indx(self.dosages, i),
-            indx(self.drugs_embeddings, indx(self.drugs_idx, i)),
+            indx(self.drugs_embeddings, torch.tensor(indx(self.drugs_idx, i))),
             indx(self.knockouts_idx, i),
             indx(self.knockouts_embeddings, indx(self.knockouts_idx, i)),
             *[indx(cov, i) for cov in self.covariates_idx],
