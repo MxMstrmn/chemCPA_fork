@@ -1,0 +1,48 @@
+name: chemCPA-env
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - matplotlib
+  - numpy
+  - pandas
+  - scanpy
+  - scipy
+  - seaborn
+  - scikit-learn
+  - ipykernel
+  - jupyter
+  - jupytext
+  - pytorch=2.1.0=py3.10_cuda12.1_cudnn8.9.2_0
+  - pytorch-cuda=12.1=ha16c6d3_5
+  - torchmetrics
+  - lightning
+  - wandb
+  # - h5py<3.2
+  - rdkit=2022.*
+  # - pytest
+  - pyarrow
+  # - pre-commit
+  # UMAP
+  # - umap-learn
+  # - datashader
+  # - bokeh
+  # - holoviews
+  # - colorcet
+  - scikit-image
+  - plotnine
+  - hydra-core
+  # - adjusttext
+  # - submitit
+  # - cudatoolkit=11.3
+  # - dglteam::dgl-cuda11.3
+  # - deepchem
+  # - seml
+  # - py-spy
+  - pip
+  - pip:
+      # - tensorflow
+      # - dgllife
+      # - scgen
