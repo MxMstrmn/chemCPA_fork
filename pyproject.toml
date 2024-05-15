@@ -1,4 +1,5 @@
 [tool.black]
+line-length = 130
 exclude = '''
 /(
     \.eggs
@@ -8,3 +9,10 @@ exclude = '''
   | dist
 )/
 '''
+
+[tool.flake8]
+max-line-length = 130
+ignore = ["E203"]
+
+[tool.isort]
+profile = "black"
