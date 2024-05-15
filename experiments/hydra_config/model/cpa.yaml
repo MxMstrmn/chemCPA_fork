@@ -6,11 +6,12 @@ append_ae_layer: false
 pretrained_model_hashes: null
 additional_params:
   seed: 1337
-  doser_type: logsigm
+  doser_type: amortized
   knockout_effect_type: original
-  decoder_activation: linear 
+  decoder_activation: ReLU 
+  run_adv: False 
 hparams:
-  dim: 128
+  dim: 32
   dosers_width: 64
   dosers_depth: 1
   dosers_lr: 0.0005
@@ -32,8 +33,8 @@ hparams:
   autoencoder_wd: 0.0000003
   adversary_wd: 0.000004
   adversary_steps: 2
-  batch_size: 128
-  step_size_lr: 100
+  batch_size: 512
+  step_size_lr: 50
   embedding_encoder_width: 512
   embedding_encoder_depth: 3
 

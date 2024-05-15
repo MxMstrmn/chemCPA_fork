@@ -1,0 +1,5 @@
+defaults:
+  - dataset: sciplex_lincs
+  - model: cpa
+  - test: test
+  - train: train
