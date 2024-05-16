@@ -282,7 +282,7 @@ class ComPert(L.LightningModule):
         append_layer_width=None,
         run_adv=False,
         basal_state_added_noise_std=1,
-        basal_state_regularization=0.1,
+        basal_state_regularization=10,
     ):
         super(ComPert, self).__init__()
         # set generic attributes
@@ -867,7 +867,6 @@ class ComPert(L.LightningModule):
         else:
             train_stats = {
                 "loss_reconstruction": reconstruction_loss.item(),
-                "basal_norm": torch.sum(latent_basal**2, dim=1).mean().item(),
             }
         self.log_dict(
             train_stats,
