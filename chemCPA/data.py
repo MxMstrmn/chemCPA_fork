@@ -416,15 +416,20 @@ def load_dataset_splits(
 
 def custom_collate_train(batch):
     genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, *covs = zip(*batch)
-    genes = torch.stack(genes, 0)
-    drugs_idx = None if drugs_idx[0] is None else [d for d in drugs_idx]
-    dosages = None if dosages[0] is None else [d for d in dosages]
-    drugs_emb = None if drugs_emb[0] is None else [d for d in drugs_emb]
-    knockouts_idx = None if knockouts_idx[0] is None else [d for d in knockouts_idx]
-    knockouts_emb = None if knockouts_emb[0] is None else [d for d in knockouts_emb]
+    genes = torch.stack(genes, dim=0)
+    drugs_idx = torch.stack(drugs_idx, dim=0)
+    dosages = torch.stack(dosages, dim=0)
+    drugs_emb = torch.concat(drugs_emb, dim=0)
+    knockouts_idx = None
+    knockouts_emb = None
+    # drugs_idx = None if drugs_idx[0] is None else [d for d in drugs_idx]
+    # dosages = None if dosages[0] is None else [d for d in dosages]
+    # drugs_emb = None if drugs_emb[0] is None else [d for d in drugs_emb]
+    # knockouts_idx = None if knockouts_idx[0] is None else [d for d in knockouts_idx]
+    # knockouts_emb = None if knockouts_emb[0] is None else [d for d in knockouts_emb]
     for i in range(len(covs)):
         covs[i] = None if (covs[i][0] is None) else torch.stack(covs[i], 0)
-    return [genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, *covs]
+    return genes, drugs_idx, dosages, drugs_emb, knockouts_idx, knockouts_emb, *covs
 
 
 def custom_collate_validate_r2(batch):
@@ -498,7 +503,7 @@ class DataModule(L.LightningDataModule):
             batch_size=self.batch_size,
             collate_fn=custom_collate_train,
             shuffle=True,
-            # num_workers=self.num_workers,
+            num_workers=self.num_workers,
         )
 
     def val_dataloader(self):
@@ -513,6 +518,7 @@ class DataModule(L.LightningDataModule):
         else:
             return DataLoader(
                 [[self.datasets["test_treated"], self.datasets["test_control"]]],
+                # [[self.datasets["training_treated"], self.datasets["training_control"]]],
                 batch_size=1,
                 collate_fn=custom_collate_validate_r2,
                 shuffle=False,
