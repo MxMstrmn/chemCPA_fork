@@ -313,19 +313,19 @@ class ComPert(L.LightningModule):
                 + [self.hparams.hparams["dosers_width"]] * self.hparams.hparams["dosers_depth"]
                 + [1]
             )
-
-        # manual optimization
-        self.automatic_optimization = False
+ 
 
         # if not isinstance(hparams, dict):
         #     hparams = self.set_hparams_(seed, hparams)
+
         # # save hyperparameters
         self.save_hyperparameters()
 
+        encoder_dimensions = [num_genes]
+                              + [self.hparams.hparams["autoencoder_width"]] * self.hparams.hparams["autoencoder_depth"]
+                              + [self.hparams.hparams["dim"]]
         self.encoder = MLP(
-            [num_genes]
-            + [self.hparams.hparams["autoencoder_width"]] * self.hparams.hparams["autoencoder_depth"]
-            + [self.hparams.hparams["dim"]],
+            encoder_dimensions,
             append_layer_width=append_layer_width,
             append_layer_position="first",
         )
@@ -342,12 +342,7 @@ class ComPert(L.LightningModule):
         if append_layer_width:
             self.num_genes = append_layer_width
 
-        if self.num_drugs > 0:
-            self.adversary_drugs = MLP(
-                [self.hparams.hparams["dim"]]
-                + [self.hparams.hparams["adversary_width"]] * self.hparams.hparams["adversary_depth"]
-                + [self.num_drugs]
-            )
+        if self.num_drugs > 0: 
 
             self.drug_embedding_encoder = MLP(
                 [self.drug_embedding_dimension]
@@ -409,35 +404,36 @@ class ComPert(L.LightningModule):
                     torch.nn.Embedding(num_covariate, self.hparams.hparams["dim"], device=_device)
                 )
 
-        # If to train in adversarial mode or not
-        if self.run_adv and self.num_drugs > 0:
-            self.adversary_drugs = MLP(
-                [self.hparams.hparams["dim"]]
-                + [self.hparams.hparams["adversary_width"]] * self.hparams.hparams["adversary_depth"]
-                + [self.num_drugs]
-            )
-            self.loss_adversary_drugs = CELoss()
-
-        if self.run_adv and self.num_knockouts > 0:
-            self.adversary_knockouts = MLP(
-                [self.hparams.hparams["dim"]]
-                + [self.hparams.hparams["adversary_width"]] * self.hparams.hparams["adversary_depth"]
-                + [self.num_knockouts]
-            )
-            self.loss_adversary_knockout = CELoss()
-
-        if self.run_adv and self.num_covariates != [0]:
-            self.adversary_covariates = []
-            self.loss_adversary_covariates = []
-            for num_covariate in self.num_covariates:
-                self.adversary_covariates.append(
-                    MLP(
-                        [self.hparams.hparams["dim"]]
-                        + [self.hparams.hparams["adversary_width"]] * self.hparams.hparams["adversary_depth"]
-                        + [num_covariate]
-                    ).to(_device)
+        # If adversial training is used, we need perceptrons that go from latent space to drugs/knockouts/covariates 
+        if self.run_adv:
+            if self.num_drugs > 0:
+                self.adversary_drugs = MLP(
+                    [self.hparams.hparams["dim"]]
+                    + [self.hparams.hparams["adversary_width"]] * self.hparams.hparams["adversary_depth"]
+                    + [self.num_drugs]
                 )
-                self.loss_adversary_covariates.append(CELoss())
+                self.loss_adversary_drugs = CELoss()
+
+            if self.num_knockouts > 0:
+                self.adversary_knockouts = MLP(
+                    [self.hparams.hparams["dim"]]
+                    + [self.hparams.hparams["adversary_width"]] * self.hparams.hparams["adversary_depth"]
+                    + [self.num_knockouts]
+                )
+                self.loss_adversary_knockout = CELoss()
+
+            if self.num_covariates != [0]:
+                self.adversary_covariates = []
+                self.loss_adversary_covariates = []
+                for num_covariate in self.num_covariates:
+                    self.adversary_covariates.append(
+                        MLP(
+                            [self.hparams.hparams["dim"]]
+                            + [self.hparams.hparams["adversary_width"]] * self.hparams.hparams["adversary_depth"]
+                            + [num_covariate]
+                        ).to(_device)
+                    )
+                    self.loss_adversary_covariates.append(CELoss())
 
     def configure_optimizers(self):
         has_drugs = self.num_drugs > 0
@@ -853,6 +849,10 @@ class ComPert(L.LightningModule):
                 scheduler_knockout_effects.step()
 
         self.iteration += 1
+
+        latent_basal_squared_size = torch.sum(latent_basal**2)
+        latent_treated_squared_size = torch.sum(latent_treated**2)
+
         train_stats = {"loss_reconstruction": reconstruction_loss.item()}
         if self.run_adv:
             train_stats = {
@@ -863,6 +863,8 @@ class ComPert(L.LightningModule):
                 "penalty_adv_drugs": adv_drugs_grad_penalty.item(),
                 "penalty_adv_knockouts": adv_knockouts_grad_penalty.item(),
                 "penalty_adv_covariates": adv_covs_grad_penalty.item(),
+                "latent_basal_squared_size": latent_basal_squared_size,
+                "latent_treated_squared_size": latent_treated_squared_size,
             }
         else:
             train_stats = {
