@@ -281,8 +281,8 @@ class ComPert(L.LightningModule):
         knockout_embedding_dimension=None,
         append_layer_width=None,
         run_adv=False,
-        basal_state_added_noise_std=0.1,
-        basal_state_regularization=10,
+        basal_state_added_noise_std=1,
+        basal_state_regularization=0.1,
     ):
         super(ComPert, self).__init__()
         # set generic attributes
@@ -290,7 +290,7 @@ class ComPert(L.LightningModule):
         self.num_drugs = num_drugs
         self.num_knockouts = num_knockouts
         self.num_covariates = num_covariates
-        self.seed = seed
+        # self.seed = seed
         self.drug_embedding_dimension = drug_embedding_dimension
         self.knockout_embedding_dimension = knockout_embedding_dimension
 
@@ -317,9 +317,9 @@ class ComPert(L.LightningModule):
         # manual optimization
         self.automatic_optimization = False
 
-        if not isinstance(hparams, dict):
-            hparams = self.set_hparams_(seed, hparams)
-        # save hyperparameters
+        # if not isinstance(hparams, dict):
+        #     hparams = self.set_hparams_(seed, hparams)
+        # # save hyperparameters
         self.save_hyperparameters()
 
         self.encoder = MLP(
@@ -460,7 +460,7 @@ class ComPert(L.LightningModule):
             _parameters, lr=self.hparams.hparams["autoencoder_lr"], weight_decay=self.hparams.hparams["autoencoder_wd"]
         )
         scheduler_autoencoder = torch.optim.lr_scheduler.StepLR(
-            optimizer_autoencoder, step_size=self.hparams.hparams["step_size_lr"], gamma=0.5
+            optimizer_autoencoder, step_size=self.hparams.hparams["step_size_lr"], gamma=0.95
         )
 
         _parameters = []
@@ -478,7 +478,7 @@ class ComPert(L.LightningModule):
                 _parameters, lr=self.hparams.hparams["adversary_lr"], weight_decay=self.hparams.hparams["adversary_wd"]
             )
             scheduler_adversary = torch.optim.lr_scheduler.StepLR(
-                optimizer_adversaries, step_size=self.hparams.hparams["step_size_lr"], gamma=0.5
+                optimizer_adversaries, step_size=self.hparams.hparams["step_size_lr"], gamma=0.95
             )
 
         # Optimizers for drugs
@@ -491,7 +491,7 @@ class ComPert(L.LightningModule):
                 weight_decay=self.hparams.hparams["dosers_wd"],
             )
             scheduler_dosers = torch.optim.lr_scheduler.StepLR(
-                optimizer_dosers, step_size=self.hparams.hparams["step_size_lr"], gamma=0.5
+                optimizer_dosers, step_size=self.hparams.hparams["step_size_lr"], gamma=0.95
             )
 
         # Optimizers for gene knockouts
@@ -504,7 +504,7 @@ class ComPert(L.LightningModule):
                 weight_decay=self.hparams.hparams["knockout_effects_wd"],
             )
             scheduler_knockout_effects = torch.optim.lr_scheduler.StepLR(
-                optimizer_knockout_effects, step_size=self.hparams.hparams["step_size_lr"], gamma=0.5
+                optimizer_knockout_effects, step_size=self.hparams.hparams["step_size_lr"], gamma=0.95
             )
 
         # Create optimizers-and-schedulers list of dictionaries
@@ -520,53 +520,53 @@ class ComPert(L.LightningModule):
             )
         return o_and_s
 
-    def set_hparams_(self, seed, hparams):
-        """
-        Set hyper-parameters to (i) default values if `seed=0`, (ii) random
-        values if `seed != 0`, or (iii) values fixed by user for those
-        hyper-parameters specified in the JSON string `hparams`.
-        """
+    # def set_hparams_(self, seed, hparams):
+    #     """
+    #     Set hyper-parameters to (i) default values if `seed=0`, (ii) random
+    #     values if `seed != 0`, or (iii) values fixed by user for those
+    #     hyper-parameters specified in the JSON string `hparams`.
+    #     """
 
-        default = seed == 0
-        torch.manual_seed(seed)
-        np.random.seed(seed)
-        hyperparameters = {
-            "dim": 256 if default else int(np.random.choice([128, 256, 512])),
-            "dosers_width": 64 if default else int(np.random.choice([32, 64, 128])),
-            "dosers_depth": 2 if default else int(np.random.choice([1, 2, 3])),
-            "dosers_lr": 1e-3 if default else float(10 ** np.random.uniform(-4, -2)),
-            "dosers_wd": 1e-7 if default else float(10 ** np.random.uniform(-8, -5)),
-            "knockout_effects_width": 64 if default else int(np.random.choice([32, 64, 128])),
-            "knockout_effects_depth": 2 if default else int(np.random.choice([1, 2, 3])),
-            "knockout_effects_lr": 1e-3 if default else float(10 ** np.random.uniform(-4, -2)),
-            "knockout_effects_wd": 1e-7 if default else float(10 ** np.random.uniform(-8, -5)),
-            "autoencoder_width": 512 if default else int(np.random.choice([256, 512, 1024])),
-            "autoencoder_depth": 4 if default else int(np.random.choice([3, 4, 5])),
-            "adversary_width": 128 if default else int(np.random.choice([64, 128, 256])),
-            "adversary_depth": 3 if default else int(np.random.choice([2, 3, 4])),
-            "reg_adversary_drug": 5 if default else float(10 ** np.random.uniform(-2, 2)),
-            "reg_adversary_knockout": 5 if default else float(10 ** np.random.uniform(-2, 2)),
-            "reg_adversary_cov": 5 if default else float(10 ** np.random.uniform(-2, 2)),
-            "penalty_adversary": 3 if default else float(10 ** np.random.uniform(-2, 1)),
-            "autoencoder_lr": 1e-3 if default else float(10 ** np.random.uniform(-4, -2)),
-            "adversary_lr": 3e-4 if default else float(10 ** np.random.uniform(-5, -3)),
-            "autoencoder_wd": 1e-6 if default else float(10 ** np.random.uniform(-8, -4)),
-            "adversary_wd": 1e-4 if default else float(10 ** np.random.uniform(-6, -3)),
-            "adversary_steps": 3 if default else int(np.random.choice([1, 2, 3, 4, 5])),
-            "batch_size": 128 if default else int(np.random.choice([64, 128, 256, 512])),
-            "step_size_lr": 45 if default else int(np.random.choice([15, 25, 45])),
-            "embedding_encoder_width": 512,
-            "embedding_encoder_depth": 0,
-        }
+    #     default = seed == 0
+    #     torch.manual_seed(seed)
+    #     np.random.seed(seed)
+    #     hyperparameters = {
+    #         "dim": 256 if default else int(np.random.choice([128, 256, 512])),
+    #         "dosers_width": 64 if default else int(np.random.choice([32, 64, 128])),
+    #         "dosers_depth": 2 if default else int(np.random.choice([1, 2, 3])),
+    #         "dosers_lr": 1e-3 if default else float(10 ** np.random.uniform(-4, -2)),
+    #         "dosers_wd": 1e-7 if default else float(10 ** np.random.uniform(-8, -5)),
+    #         "knockout_effects_width": 64 if default else int(np.random.choice([32, 64, 128])),
+    #         "knockout_effects_depth": 2 if default else int(np.random.choice([1, 2, 3])),
+    #         "knockout_effects_lr": 1e-3 if default else float(10 ** np.random.uniform(-4, -2)),
+    #         "knockout_effects_wd": 1e-7 if default else float(10 ** np.random.uniform(-8, -5)),
+    #         "autoencoder_width": 512 if default else int(np.random.choice([256, 512, 1024])),
+    #         "autoencoder_depth": 4 if default else int(np.random.choice([3, 4, 5])),
+    #         "adversary_width": 128 if default else int(np.random.choice([64, 128, 256])),
+    #         "adversary_depth": 3 if default else int(np.random.choice([2, 3, 4])),
+    #         "reg_adversary_drug": 5 if default else float(10 ** np.random.uniform(-2, 2)),
+    #         "reg_adversary_knockout": 5 if default else float(10 ** np.random.uniform(-2, 2)),
+    #         "reg_adversary_cov": 5 if default else float(10 ** np.random.uniform(-2, 2)),
+    #         "penalty_adversary": 3 if default else float(10 ** np.random.uniform(-2, 1)),
+    #         "autoencoder_lr": 1e-3 if default else float(10 ** np.random.uniform(-4, -2)),
+    #         "adversary_lr": 3e-4 if default else float(10 ** np.random.uniform(-5, -3)),
+    #         "autoencoder_wd": 1e-6 if default else float(10 ** np.random.uniform(-8, -4)),
+    #         "adversary_wd": 1e-4 if default else float(10 ** np.random.uniform(-6, -3)),
+    #         "adversary_steps": 3 if default else int(np.random.choice([1, 2, 3, 4, 5])),
+    #         "batch_size": 128 if default else int(np.random.choice([64, 128, 256, 512])),
+    #         "step_size_lr": 45 if default else int(np.random.choice([15, 25, 45])),
+    #         "embedding_encoder_width": 512,
+    #         "embedding_encoder_depth": 0,
+    #     }
 
-        # the user may fix some hparams
-        if hparams != "":
-            if isinstance(hparams, str):
-                hyperparameters.update(json.loads(hparams))
-            else:
-                hyperparameters.update(hparams)
+    #     # the user may fix some hparams
+    #     if hparams != "":
+    #         if isinstance(hparams, str):
+    #             hyperparameters.update(json.loads(hparams))
+    #         else:
+    #             hyperparameters.update(hparams)
 
-        return hyperparameters
+    #     return hyperparameters
 
     def compute_drug_and_knockout_embeddings_(self, drugs_idx, dosages, drugs_embeddings, doser_type, dosers, encoder):
         """
@@ -584,12 +584,12 @@ class ComPert(L.LightningModule):
         For knockouts all the "dosages" are set to 1, then this computes the effective effect size and the resulting embedding
         """
         assert drugs_idx is not None and dosages is not None
-        stacked_idx = []
-        for i, dosage in enumerate(dosages):
-            if i == 0:
-                stacked_idx.append(len(dosage))
-            else:
-                stacked_idx.append(len(dosage) + stacked_idx[-1])
+        # stacked_idx = []
+        # for i, dosage in enumerate(dosages):
+        #     if i == 0:
+        #         stacked_idx.append(len(dosage))
+        #     else:
+        #         stacked_idx.append(len(dosage) + stacked_idx[-1])
 
         scaled_dosages = []
         if doser_type == "mlp":
@@ -601,41 +601,47 @@ class ComPert(L.LightningModule):
                 scaled_dosages.append(scaled_dosage.squeeze(0))
 
         elif doser_type == "amortized":
-            total_stack = [
-                torch.concat([embedding, dosage.view(-1, 1)], dim=1)
-                for dosage, embedding in zip(dosages, drugs_embeddings)
-            ]
-            total_stack = torch.cat(total_stack, dim=0).float()
+            # total_stack = [
+            #     torch.concat([embedding, dosage.view(-1, 1)], dim=1)
+            #     for dosage, embedding in zip(dosages, drugs_embeddings)
+            # ]
+            # total_stack = torch.cat(total_stack, dim=0).float()
+            total_stack = torch.concat([drugs_embeddings, dosages.view(-1, 1)], dim=1).float()
             stacked_dosages = dosers(total_stack)
-            stacked_idx = []
-            for i, dosage in enumerate(dosages):
-                if i == 0:
-                    stacked_idx.append(len(dosage))
-                else:
-                    stacked_idx.append(len(dosage) + stacked_idx[-1])
-            for i in range(len(dosages)):
-                if i == 0:
-                    scaled_dosages.append(stacked_dosages[0 : stacked_idx[0]].view(-1))
-                else:
-                    scaled_dosages.append(stacked_dosages[stacked_idx[i - 1] : stacked_idx[i]].view(-1))
+            scaled_dosages = stacked_dosages
+            # stacked_idx = []
+            # for i, dosage in enumerate(dosages):
+            #     if i == 0:
+            #         stacked_idx.append(len(dosage))
+            #     else:
+            #         stacked_idx.append(len(dosage) + stacked_idx[-1])
+            # for i in range(len(dosages)):
+            #     if i == 0:
+            #         scaled_dosages.append(stacked_dosages[0 : stacked_idx[0]].view(-1))
+            #     else:
+            #         scaled_dosages.append(stacked_dosages[stacked_idx[i - 1] : stacked_idx[i]].view(-1))
 
         else:
             assert doser_type in ("sigm", "logsigm", "original")
             for idx, dosage in zip(drugs_idx, dosages):
                 scaled_dosages.append(dosers(dosage, idx.long()))
 
-        latent_stacked = encoder(torch.concat(drugs_embeddings, dim=0).to(torch.float32))
-        latent_drugs = []
-        for i in range(len(drugs_embeddings)):
-            if i == 0:
-                latent_drugs.append(latent_stacked[0 : stacked_idx[0]])
-            else:
-                latent_drugs.append(latent_stacked[stacked_idx[i - 1] : stacked_idx[i]])
-        latent_drugs = [
-            torch.einsum("b,bd->bd", [scaled_dosage, latent_drug])
-            for scaled_dosage, latent_drug in zip(scaled_dosages, latent_drugs)
-        ]
-        return torch.stack([latent_drug.sum(dim=0) for latent_drug in latent_drugs])
+        # latent_stacked = encoder(torch.concat(drugs_embeddings, dim=0).to(torch.float32))
+        latent_stacked = encoder(drugs_embeddings)
+        latent_drugs = latent_stacked
+        # latent_drugs = []
+        # for i in range(len(drugs_embeddings)):
+        #     if i == 0:
+        #         latent_drugs.append(latent_stacked[0 : stacked_idx[0]])
+        #     else:
+        #         latent_drugs.append(latent_stacked[stacked_idx[i - 1] : stacked_idx[i]])
+        # latent_drugs = [
+        #     torch.einsum("b,bd->bd", [scaled_dosage, latent_drug])
+        #     for scaled_dosage, latent_drug in zip(scaled_dosages, latent_drugs)
+        # ]
+        latent_drugs = torch.einsum("b,bd->bd", scaled_dosages.squeeze(), latent_drugs)
+        # return torch.stack([latent_drug.sum(dim=0) for latent_drug in latent_drugs])
+        return latent_drugs
 
     def predict(
         self,
@@ -654,14 +660,14 @@ class ComPert(L.LightningModule):
         """
 
         latent_basal = self.encoder(genes)
-        if not self.run_adv:
+        if not self.run_adv and self.training:
             latent_treated = (
                 latent_basal + torch.randn(latent_basal.shape).to(self.device) * self.basal_state_added_noise_std
             )
         else:
             latent_treated = latent_basal
 
-        latent_treated = latent_basal
+        # latent_treated = latent_basal
         if self.num_drugs > 0:
             drug_embedding = self.compute_drug_and_knockout_embeddings_(
                 drugs_idx,
@@ -827,7 +833,10 @@ class ComPert(L.LightningModule):
                     - self.hparams.hparams["reg_adversary_cov"] * adversary_covariates_loss
                 )
             else:
-                self.manual_backward(reconstruction_loss + self.basal_state_regularization * torch.norm(latent_basal))
+                self.manual_backward(
+                    1e4 * reconstruction_loss
+                    + self.basal_state_regularization * torch.sum(latent_basal**2, dim=1).mean()
+                )
             optimizer_autoencoder.step()
             if train_drugs:
                 optimizer_dosers.step()
@@ -856,7 +865,10 @@ class ComPert(L.LightningModule):
                 "penalty_adv_covariates": adv_covs_grad_penalty.item(),
             }
         else:
-            train_stats = {"loss_reconstruction": reconstruction_loss.item()}
+            train_stats = {
+                "loss_reconstruction": reconstruction_loss.item(),
+                "basal_norm": torch.sum(latent_basal**2, dim=1).mean().item(),
+            }
         self.log_dict(
             train_stats,
             on_step=True,
