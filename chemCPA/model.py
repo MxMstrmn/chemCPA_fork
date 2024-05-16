@@ -313,6 +313,9 @@ class ComPert(L.LightningModule):
                 + [self.hparams.hparams["dosers_width"]] * self.hparams.hparams["dosers_depth"]
                 + [1]
             )
+
+        # manual optimization
+        self.automatic_optimization = False
  
 
         # if not isinstance(hparams, dict):
@@ -321,9 +324,7 @@ class ComPert(L.LightningModule):
         # # save hyperparameters
         self.save_hyperparameters()
 
-        encoder_dimensions = [num_genes]
-                              + [self.hparams.hparams["autoencoder_width"]] * self.hparams.hparams["autoencoder_depth"]
-                              + [self.hparams.hparams["dim"]]
+        encoder_dimensions = [num_genes]+ [self.hparams.hparams["autoencoder_width"]] * self.hparams.hparams["autoencoder_depth"]+ [self.hparams.hparams["dim"]]
         self.encoder = MLP(
             encoder_dimensions,
             append_layer_width=append_layer_width,
@@ -700,7 +701,7 @@ class ComPert(L.LightningModule):
         normalized_reconstructions = torch.concat([mean, var], dim=1)
 
         if return_latent_basal:
-            return normalized_reconstructions, latent_basal
+            return normalized_reconstructions, latent_basal, latent_treated
 
         return normalized_reconstructions
 
@@ -715,7 +716,7 @@ class ComPert(L.LightningModule):
             batch[5],
             batch[6:],
         )
-        gene_reconstructions, latent_basal = self.predict(
+        gene_reconstructions, latent_basal, latent_treated = self.predict(
             genes=genes,
             drugs_idx=drugs_idx,
             dosages=dosages,
