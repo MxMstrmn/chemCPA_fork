@@ -1,42 +1,42 @@
 model_type: CPA
 pretrained_model_path: null
-save_dir: /Users/zkm/Desktop/chemCPA_fork/chemCPA/train_data
+save_dir: /nfs/homedirs/hetzell/code/chemCPA_fork/project_folder/checkpoints/hydra
 load_pretrained: false
 append_ae_layer: false  
 pretrained_model_hashes: null
 additional_params:
-  seed: 1337
+  seed: 42
   doser_type: amortized
   knockout_effect_type: original
   decoder_activation: ReLU 
   run_adv: False 
 hparams:
+  batch_size: 256
   dim: 32
-  dosers_width: 64
-  dosers_depth: 1
-  dosers_lr: 0.0005
-  dosers_wd: 0.0000001
-  knockout_effects_width: 64
-  knockout_effects_depth: 1
-  knockout_effects_lr: 0.0005
-  knockout_effects_wd: 0.0000001
   autoencoder_width: 512
   autoencoder_depth: 4
+  autoencoder_lr: 0.0001
+  autoencoder_wd: 0.0000003
+  dosers_width: 128
+  dosers_depth: 3
+  dosers_lr: 0.0001
+  dosers_wd: 0.0000001
   adversary_width: 128
   adversary_depth: 3
+  adversary_lr: 0.0003
   reg_adversary_drug: 5
   reg_adversary_knockout: 5
   reg_adversary_cov: 5
   penalty_adversary: 3
-  autoencoder_lr: 0.001
-  adversary_lr: 0.0003
-  autoencoder_wd: 0.0000003
   adversary_wd: 0.000004
   adversary_steps: 2
-  batch_size: 512
-  step_size_lr: 50
-  embedding_encoder_width: 512
-  embedding_encoder_depth: 3
+  step_size_lr: 5
+  embedding_encoder_width: 256
+  embedding_encoder_depth: 4
+  knockout_effects_width: 64
+  knockout_effects_depth: 1
+  knockout_effects_lr: 0.0005
+  knockout_effects_wd: 0.0000001
 
   
   
