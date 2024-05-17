@@ -834,6 +834,8 @@ class ComPert(L.LightningModule):
                     1e4 * reconstruction_loss
                     + self.basal_state_regularization * torch.sum(latent_basal**2, dim=1).mean()
                 )
+                max_norm = 1.0
+                torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm)
             optimizer_autoencoder.step()
             if train_drugs:
                 optimizer_dosers.step()
@@ -855,6 +857,9 @@ class ComPert(L.LightningModule):
         latent_treated_squared_size = torch.sum(latent_treated**2)
 
         train_stats = {"loss_reconstruction": reconstruction_loss.item()}
+
+
+
         if self.run_adv:
             train_stats = {
                 "loss_reconstruction": reconstruction_loss.item(),
@@ -864,12 +869,13 @@ class ComPert(L.LightningModule):
                 "penalty_adv_drugs": adv_drugs_grad_penalty.item(),
                 "penalty_adv_knockouts": adv_knockouts_grad_penalty.item(),
                 "penalty_adv_covariates": adv_covs_grad_penalty.item(),
-                "latent_basal_squared_size": latent_basal_squared_size,
-                "latent_treated_squared_size": latent_treated_squared_size,
+                
             }
         else:
             train_stats = {
                 "loss_reconstruction": reconstruction_loss.item(),
+                "latent_basal_squared_size": latent_basal_squared_size,
+                "latent_treated_squared_size": latent_treated_squared_size,
             }
         self.log_dict(
             train_stats,
@@ -902,6 +908,7 @@ class ComPert(L.LightningModule):
                     "var_score": evaluation_r2_scores[2],
                     "var_score_de": evaluation_r2_scores[3],
                     "average_r2_score": np.mean(evaluation_r2_scores),
+                   
                     #'mean_r2_sc_score': evaluation_r2_sc_scores[0],
                     #'mean_r2_sc_score_de': evaluation_r2_sc_scores[1],
                     #'var_sc_score': evaluation_r2_sc_scores[2],
